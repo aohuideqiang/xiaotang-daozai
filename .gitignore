@@ -1,4 +1,5 @@
 /target/
+/.tools/
 /prebuilt/
 /daozai.exe
 /dist/

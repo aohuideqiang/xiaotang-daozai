@@ -33,11 +33,22 @@ fn main() {
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=assets/daozai.ico");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=WINDRES");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("daozai.res");
     let Some(rc) = find_rc() else {
+        // GNU builds can embed the same icon/version resources without the Windows SDK.
+        if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+            let object = out.with_extension("o");
+            let windres = env::var_os("WINDRES").unwrap_or_else(|| "windres.exe".into());
+            if Command::new(windres).args(["--codepage=65001", "-O", "coff", "-i", "app.rc", "-o"])
+                .arg(&object).status().is_ok_and(|s| s.success()) {
+                println!("cargo:rustc-link-arg={}", object.display());
+                return;
+            }
+        }
         println!("cargo:warning=rc.exe 未找到，跳过图标资源");
         return;
     };

@@ -27,16 +27,18 @@ pub enum Provider {
     Feishu,
     DingTalk,
     WeCom,
+    Custom,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Feishu, Provider::DingTalk, Provider::WeCom];
+    pub const ALL: [Provider; 4] = [Provider::Feishu, Provider::DingTalk, Provider::WeCom, Provider::Custom];
 
     pub fn key(self) -> &'static str {
         match self {
             Provider::Feishu => "feishu",
             Provider::DingTalk => "dingtalk",
             Provider::WeCom => "wecom",
+            Provider::Custom => "caldav",
         }
     }
 
@@ -45,6 +47,7 @@ impl Provider {
             Provider::Feishu => "飞书",
             Provider::DingTalk => "钉钉",
             Provider::WeCom => "企业微信",
+            Provider::Custom => "个人日历",
         }
     }
 
@@ -54,12 +57,18 @@ impl Provider {
             Provider::Feishu => "https://caldav.feishu.cn/calendars/",
             Provider::DingTalk => "https://calendar.dingtalk.com",
             Provider::WeCom => "https://wecom.work",
+            Provider::Custom => "",
         }
     }
 
     /// 「在哪拿？」三步引导，直接对应客户端菜单。
     pub fn guide(self) -> [&'static str; 3] {
         match self {
+            Provider::Custom => [
+                "填写自己的 CalDAV 服务器或日历集合 HTTPS 地址",
+                "输入该服务的用户名和应用密码",
+                "点击测试并保存，连接后只读同步日程和提醒",
+            ],
             Provider::Feishu => [
                 "桌面端右上角头像 → 设置",
                 "日历 → CalDAV 同步配置 → 选「其它设备」",
@@ -82,6 +91,7 @@ impl Provider {
         match key {
             "dingtalk" => Provider::DingTalk,
             "wecom" => Provider::WeCom,
+            "caldav" => Provider::Custom,
             _ => Provider::Feishu,
         }
     }
@@ -95,14 +105,47 @@ pub struct Config {
     pub username: String,
     /// 发现到的日历集合地址；`None` 表示还没发现。
     pub href: Option<String>,
-    /// 服务器地址覆盖（只在录制/测试里用）。
+    /// 自定义 CalDAV 地址；内置平台通常使用默认入口。
     pub server: Option<String>,
 }
 
 impl Config {
+    pub fn from_input(provider: Provider, username: &str, server: &str) -> Result<Self, String> {
+        let username = username.trim().to_owned();
+        if username.is_empty() { return Err("请先填用户名".into()); }
+        let server = if provider == Provider::Custom {
+            if username.contains(':') { return Err("CalDAV 用户名不能包含冒号".into()); }
+            Some(validate_server(server)?)
+        } else { None };
+        Ok(Self { provider, username, href: None, server })
+    }
+
+    pub fn credential_name(&self) -> String {
+        if self.provider == Provider::Custom {
+            // 自建服务的用户名可能区分大小写，且不同服务器不能共用凭据。
+            let origin = url::Url::parse(&self.base()).map(|u| u.origin().ascii_serialization()).unwrap_or_else(|_| self.base());
+            format!("caldav:{}:{}", origin, self.username.trim())
+        } else {
+            format!("{}:{}", self.provider.key(), self.username.trim().to_ascii_lowercase())
+        }
+    }
+
     pub fn base(&self) -> String {
         self.server.clone().unwrap_or_else(|| self.provider.server().to_string())
     }
+}
+
+pub fn validate_server(server: &str) -> Result<String, String> {
+    let mut parsed = url::Url::parse(server.trim()).map_err(|_| "请填写完整的 CalDAV HTTPS 地址".to_string())?;
+    let local = parsed.host_str().is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+    if parsed.host_str().is_none() || !(parsed.scheme() == "https" || parsed.scheme() == "http" && local) {
+        return Err("CalDAV 服务器需要 HTTPS；本机回环地址可使用 HTTP".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("地址中请勿包含账号、密码、查询参数或片段，账号密码请分别填写".into());
+    }
+    if !parsed.path().ends_with('/') { parsed.set_path(&format!("{}/", parsed.path())); }
+    Ok(parsed.into())
 }
 
 fn config_path() -> std::path::PathBuf {
@@ -191,7 +234,7 @@ pub fn save_connection(cfg: &Config, password: &str, old: Option<&Config>) -> Re
     let saved = load_configs().into_iter().find(|saved| saved.provider == cfg.provider);
     let old = saved.as_ref().or(old.filter(|old| old.provider == cfg.provider));
     let same_account = old.is_some_and(|old|
-        old.provider == cfg.provider && old.username.eq_ignore_ascii_case(&cfg.username));
+        old.credential_name() == cfg.credential_name());
     let previous_password = secrets::load(cfg).ok();
     secrets::save(cfg, password)?;
     if let Err(error) = save_config(cfg) {
@@ -241,7 +284,7 @@ pub mod secrets {
     }
 
     fn name(cfg: &super::Config) -> String {
-        format!("{}:{}", cfg.provider.key(), cfg.username.trim().to_ascii_lowercase())
+        cfg.credential_name()
     }
 }
 
@@ -342,6 +385,7 @@ pub struct Failure {
 impl Failure {
     fn status(provider: Provider, code: u16) -> Self {
         let message = match code {
+            401 if provider == Provider::Custom => "用户名或密码不对，请核对日历服务的账号和应用密码".into(),
             401 => format!("用户名或密码不对，请回{}重新生成一次", provider.label()),
             403 => "日历服务器拒绝访问（403），请核对同步地址、专用密码及日历授权".to_string(),
             404 => "服务器地址不对（404）".to_string(),
@@ -921,6 +965,57 @@ pub fn human_error(provider: Provider, status: Option<u16>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_caldav_input_and_credentials_are_scoped_to_the_server() {
+        let cfg=Config::from_input(Provider::Custom," Alice "," https://calendar.example/dav/me ").unwrap();
+        assert_eq!(cfg.base(),"https://calendar.example/dav/me/");
+        assert_eq!(decode_config(&encode_config(&cfg)),Some(cfg.clone()));
+        assert_eq!(Provider::parse("caldav"),Provider::Custom);
+        for invalid in ["", "http://calendar.example/", "ftp://calendar.example/", "https://user:password@calendar.example/", "https://calendar.example/?token=secret", "https://calendar.example/#secret"] {
+            assert!(Config::from_input(Provider::Custom,"Alice",invalid).is_err(),"{invalid}");
+        }
+        assert!(Config::from_input(Provider::Custom,"a:b","https://calendar.example/").is_err());
+        assert!(Config::from_input(Provider::Custom,"Alice","http://127.0.0.1:5232/").is_ok());
+        let other=Config::from_input(Provider::Custom,"Alice","https://other.example/").unwrap();
+        let lowercase=Config{username:"alice".into(),..cfg.clone()};
+        assert_ne!(cfg.credential_name(),other.credential_name());
+        assert_ne!(cfg.credential_name(),lowercase.credential_name());
+        assert_eq!(Failure::status(Provider::Custom,401).message,"用户名或密码不对，请核对日历服务的账号和应用密码");
+    }
+
+    #[test]
+    fn custom_caldav_discovers_a_direct_collection_and_reads_its_month() {
+        use std::{io::Write,net::TcpListener};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let base=format!("http://{}/personal/calendar/",listener.local_addr().unwrap());
+        let cfg=Config::from_input(Provider::Custom,"Alice",&base).unwrap();
+        let worker=std::thread::spawn(move||{
+            for index in 0..2 {
+                let (mut stream,_)=listener.accept().unwrap();
+                let request=read_discovery_request(&mut stream);
+                assert!(request.starts_with(if index==0 {"PROPFIND /personal/calendar/ "}else{"REPORT /personal/calendar/ "}));
+                assert!(request.to_ascii_lowercase().contains("authorization: basic "));
+                let body=if index==0 {
+                    r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/personal/calendar/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#
+                }else{
+                    r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/personal/calendar/event.ics</d:href><d:propstat><d:prop><c:calendar-data>BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:personal-synthetic
+DTSTART:20261105T020000Z
+DTEND:20261105T030000Z
+SUMMARY:个人日程
+END:VEVENT
+END:VCALENDAR</c:calendar-data></d:prop></d:propstat></d:response></d:multistatus>"#
+                };
+                write!(stream,"HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let fetched=fetch_month(&cfg,"synthetic-password",NaiveDate::from_ymd_opt(2026,11,1).unwrap()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(fetched.href,base);assert_eq!(fetched.events.len(),1);
+        assert_eq!(fetched.events[0].title,"个人日程");
+    }
     #[test]
     fn wecom_uses_exchange_endpoint() {
         assert_eq!(Provider::WeCom.server(), "https://wecom.work");

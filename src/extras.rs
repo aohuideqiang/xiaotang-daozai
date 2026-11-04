@@ -963,7 +963,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","独立课表","剪贴板历史","下载进度","常用快捷入口","CPU 与内存","服务器任务状态"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1286,7 +1286,7 @@ impl App {
                     8=>{
                         ui.spacing_mut().item_spacing.y=4.0;
                         // v0.5.6 日程：状态在最上面，后面才是平台、账号和提醒。
-                        // 只读；服务器地址由平台决定，用户不用抄。
+                        // 只读；内置平台使用默认入口，个人日历可以编辑服务器地址。
                         if let Some(cfg)=self.calendar.config.clone(){
                             settings_card(ui,|ui|{
                                 let n=self.calendar.events.len();
@@ -1313,7 +1313,8 @@ impl App {
                                 ui.set_min_width(ui.available_width());
                                 ui.spacing_mut().item_spacing.x=2.0;
                                 ui.horizontal(|ui|{
-                                    let width=((ui.available_width()-4.0)/3.0).max(80.0);
+                                    let count=crate::calendar::Provider::ALL.len() as f32;
+                                    let width=((ui.available_width()-(count-1.0)*ui.spacing().item_spacing.x)/count).max(60.0);
                                     for p in crate::calendar::Provider::ALL{
                                         let selected=self.calendar.form.provider==p;
                                         let button=egui::Button::new(egui::RichText::new(p.label()).size(13.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(190),Color32::from_gray(65))}))
@@ -1328,7 +1329,13 @@ impl App {
                             ui.add_space(7.0);
                             ui.horizontal_top(|ui|{
                                 ui.allocate_ui_with_layout(egui::vec2(50.0,18.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.set_min_size(egui::vec2(50.0,18.0));ui.label(egui::RichText::new("服务器").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));});
-                                ui.add(egui::Label::new(egui::RichText::new(self.calendar.form.provider.server()).size(12.0).color(settings_color(ctx,Color32::from_gray(205),Color32::from_gray(55)))).wrap());
+                                if self.calendar.form.provider==crate::calendar::Provider::Custom {
+                                    let width=ui.available_width();
+                                    ui.add_enabled_ui(!self.calendar.testing,|ui|ui.add_sized([width,30.0],egui::TextEdit::singleline(&mut self.calendar.form.server)
+                                        .id(egui::Id::new("calendar-custom-server")).hint_text("https://你的服务器/日历路径/")));
+                                } else {
+                                    ui.add(egui::Label::new(egui::RichText::new(self.calendar.form.provider.server()).size(12.0).color(settings_color(ctx,Color32::from_gray(205),Color32::from_gray(55)))).wrap());
+                                }
                             });
                         });
                         settings_label(ui,"连接账号");
@@ -1378,12 +1385,16 @@ impl App {
                                 if user.is_empty(){self.calendar.note="请先填用户名".into();self.calendar.note_error=true;}
                                 else if self.calendar.form.password.is_empty(){self.calendar.note="请先填密码".into();self.calendar.note_error=true;}
                                 else{
-                                    let cfg=crate::calendar::Config{provider:self.calendar.form.provider,username:user,href:None,server:None};
-                                    self.calendar.testing=true;
-                                    self.calendar.test_password=self.calendar.form.password.clone();
-                                    self.calendar.note="正在连接日历…".into();
-                                    self.calendar.note_error=false;
-                                    self.pending.push(Cmd::CalendarTest(cfg,self.calendar.form.password.clone()));
+                                    match crate::calendar::Config::from_input(self.calendar.form.provider,&user,&self.calendar.form.server) {
+                                        Err(message)=>{self.calendar.note=message;self.calendar.note_error=true;}
+                                        Ok(cfg)=>{
+                                            self.calendar.testing=true;
+                                            self.calendar.test_password=self.calendar.form.password.clone();
+                                            self.calendar.note="正在连接日历…".into();
+                                            self.calendar.note_error=false;
+                                            self.pending.push(Cmd::CalendarTest(cfg,self.calendar.form.password.clone()));
+                                        }
+                                    }
                                 }
                             }
                             ui.add_space(5.0);

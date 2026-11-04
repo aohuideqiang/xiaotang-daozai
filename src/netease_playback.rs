@@ -1,5 +1,7 @@
 //! 网易云原生播放事件：只读增量日志，不依赖 SMTC 或特定 DLL 版本。
 use super::{MediaKind,NowPlaying};
+#[path="netease_paths.rs"]
+mod netease_paths;
 use std::{fs::File,io::{Read,Seek,SeekFrom},path::Path,sync::{mpsc,Arc},time::{Duration,Instant}};
 
 const MAX_READ:u64=4*1024*1024;
@@ -129,6 +131,7 @@ fn fetch_cover(url:&str)->Option<Arc<eframe::egui::ColorImage>>{
 
 #[derive(Default)]
 pub(super) struct Reader {
+    path:Option<std::path::PathBuf>,
     pid:u32,offset:u64,prefix:Vec<u8>,carry:Vec<u8>,skip_line:bool,
     playback:Playback,lookup:(Option<u64>,u64),cover:CoverCache,
 }
@@ -150,11 +153,11 @@ impl Reader {
     }
     fn read(&mut self,path:&Path,pid:Option<u32>,now:u64)->Option<NowPlaying>{
         let Some(pid)=pid else{*self=Self::default();return None;};
-        if self.pid!=pid{*self=Self{pid,..Self::default()};}
+        if self.pid!=pid || self.path.as_deref()!=Some(path){*self=Self{pid,path:Some(path.to_owned()),..Self::default()};}
         let mut file=match File::open(path){Ok(file)=>file,Err(_)=>{*self=Self{pid,..Self::default()};return None;}};
         let size=file.metadata().ok()?.len();
         let mut prefix=vec![0;64.min(size as usize)];file.read_exact(&mut prefix).ok()?;
-        if size<self.offset || !prefix.starts_with(&self.prefix){*self=Self{pid,..Self::default()};}
+        if size<self.offset || !prefix.starts_with(&self.prefix){*self=Self{pid,path:Some(path.to_owned()),..Self::default()};}
         self.prefix=prefix;
         if size>self.offset{
             let start=self.offset.max(size.saturating_sub(MAX_READ));
@@ -172,9 +175,12 @@ impl Reader {
         self.playback.snapshot(now)
     }
     pub(super) fn poll(&mut self)->Option<NowPlaying>{
-        let path=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("NetEase/CloudMusic/cloudmusic.elog");
+        let local=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        let pid=process_id();
+        let family=pid.and_then(netease_paths::package_family);
+        let path=netease_paths::log_path(&local,family.as_deref());
         let sampled=std::time::Instant::now();
-        let mut media=self.read(&path,process_id(),unsafe{windows::Win32::System::SystemInformation::GetTickCount64()})?;
+        let mut media=self.read(&path,pid,unsafe{windows::Win32::System::SystemInformation::GetTickCount64()})?;
         if self.cover.url==self.playback.artwork_url{media.artwork=self.cover.image.clone();}
         media.sampled_at=Some(sampled);Some(media)
     }
@@ -313,6 +319,20 @@ mod tests{
         let mut reader=Reader::default();let media=reader.read(&path,Some(9),2100).unwrap();assert_eq!(media.title,"续播歌曲");assert_eq!(media.position,81.0);
         assert_eq!(reader.playback.artwork_url,"https://p1.music.126.net/resume.jpg?param=256y256");
         std::fs::remove_file(path).unwrap();std::fs::remove_file(queue.join("playingList")).unwrap();std::fs::remove_dir(&queue).unwrap();std::fs::remove_dir(dir.join("webdata")).unwrap();std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn changing_data_directory_does_not_keep_the_previous_log_offset(){
+        let dir=std::env::temp_dir().join(format!("daozai-elog-path-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let desktop=dir.join("desktop.elog");let store=dir.join("store.elog");
+        let start=event(7,1000,&metadata())+&event(7,2000,"\"native播放资源load完成\",{\"songId\":\"123\"}");
+        std::fs::write(&desktop,encode(&(start.clone()+&event(7,2500,"\"setPlayingPosition\",90")))).unwrap();
+        std::fs::write(&store,encode(&(start+&event(7,2500,"\"setPlayingPosition\",20")))).unwrap();
+        let mut reader=Reader::default();
+        assert_eq!(reader.read(&desktop,Some(7),3000).unwrap().position,90.5);
+        assert_eq!(reader.read(&store,Some(7),3000).unwrap().position,20.5);
+        assert_eq!(reader.read(&store,Some(7),4000).unwrap().position,21.5);
+        std::fs::remove_file(desktop).unwrap();std::fs::remove_file(store).unwrap();std::fs::remove_dir(dir).unwrap();
     }
     #[test]
     #[ignore="需要本机网易云正在播放，用于验证无 SMTC 的原生数据和歌词"]

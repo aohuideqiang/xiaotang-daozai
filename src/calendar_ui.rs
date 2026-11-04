@@ -124,7 +124,7 @@ pub(crate) fn source_icon(c:&Card,source:Source<'_>,x:f32,y:f32,size:f32) {
     let pixels=(rect.width()*c.ui.ctx().pixels_per_point()).ceil() as u32;
     let icon=egui::Image::from_bytes(format!("{uri}/{pixels}.svg"),bytes);
     if let Ok(egui::load::TexturePoll::Ready{texture})=icon.fit_to_exact_size(rect.size()).load_for_size(c.ui.ctx(),rect.size()) {
-        let tint=if matches!(source,Source::Calendar(None)|Source::Local){source.color()}else{Color32::WHITE};
+        let tint=if matches!(source,Source::Calendar(None)|Source::Calendar(Some(calendar::Provider::Custom))|Source::Local){source.color()}else{Color32::WHITE};
         c.painter.image(texture.id,rect,egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),tint);
     }
 }
@@ -244,6 +244,8 @@ impl App {
     }
 
     pub(crate) fn page_calendar(&mut self,c:&Card,env:&Env) {
+        c.centered_text(275.0,18.0,"课表",9.0,W::Regular,theme::GRAY,H::Center);
+        if c.hit(253.0,5.0,44.0,24.0,"course-preview").clicked(){self.desktop_tools.open=true;self.desktop_tools.tab=0;}
         let accent=Color32::from_rgb(82,162,255);
         let muted=Color32::from_rgb(142,142,150);
         let today=NaiveDate::parse_from_str(&env.today,"%Y-%m-%d").unwrap_or_else(|_|chrono::Local::now().date_naive());

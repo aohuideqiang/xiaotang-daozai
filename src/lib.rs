@@ -48,7 +48,7 @@ pub mod native;
 pub mod tray;
 
 #[cfg(test)]
-mod ui_tests;
-#[cfg(test)]
 #[path = "bin/daozai-record/raster.rs"]
 mod preview_raster;
+
+mod desktop_tools;

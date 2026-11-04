@@ -38,7 +38,7 @@ pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 14] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "课表", "剪贴板", "下载", "快捷启动", "系统性能", "服务器任务"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -276,6 +276,7 @@ impl CalendarFeed {
 #[derive(Default)]
 pub(crate) struct CalendarForm {
     pub provider: calendar::Provider,
+    pub server: String,
     pub username: String,
     pub password: String,
     pub show: bool,
@@ -286,6 +287,7 @@ impl CalendarState {
     pub fn load() -> Self {
         let config = calendar::load_config();
         let form = CalendarForm { provider: calendar::selected_provider(),
+            server: config.as_ref().and_then(|cfg|cfg.server.clone()).unwrap_or_default(),
             username: config.as_ref().map(|cfg| cfg.username.clone()).unwrap_or_default(), ..Default::default() };
         let feeds = calendar::load_configs().into_iter().map(CalendarFeed::new).collect();
         let (local,local_error)=match crate::local_calendar::load(){Ok(events)=>(events,String::new()),Err(error)=>(vec![],error)};
@@ -295,6 +297,7 @@ impl CalendarState {
 }
 
 pub struct App {
+    pub(crate) desktop_tools: crate::desktop_tools::Tools,
     pub opts: Options,
     pub settings: model::Settings,
     pub(crate) todos: model::TodoList,
@@ -317,8 +320,9 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 14],
     wheel_delta: f32,
+    page_swipe_start: Option<Pos2>,
     wheel_at: f64,
     wheel_page_at: f64,
 
@@ -440,6 +444,7 @@ impl App {
         let initial_lyrics=settings.lyrics_enabled;
         let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
         Self {
+            desktop_tools: Default::default(),
             opts,
             settings,
             todos: model::TodoList::load(),
@@ -459,6 +464,7 @@ impl App {
             slide: Spring::new(0.0, 260.0, 0.92),
             dots: std::array::from_fn(|i| Spring::new(if i == initial_page { 16.0 } else { 4.0 }, 380.0, 0.86)),
             wheel_delta: 0.0,
+            page_swipe_start: None,
             wheel_at: -1.0,
             wheel_page_at: -1.0,
             drag_hot: false,
@@ -712,7 +718,7 @@ impl App {
         self.calendar.last_sync=feed.map(|feed|feed.last_sync.clone()).unwrap_or_default();
         self.calendar.failures=feed.map(|feed|feed.failures).unwrap_or_default();
         self.calendar.error=feed.map(|feed|feed.error.clone()).unwrap_or_default();
-        self.calendar.form=CalendarForm{provider,username:self.calendar.config.as_ref().map(|cfg|cfg.username.clone()).unwrap_or_default(),..Default::default()};
+        self.calendar.form=CalendarForm{provider,server:self.calendar.config.as_ref().and_then(|cfg|cfg.server.clone()).unwrap_or_default(),username:self.calendar.config.as_ref().map(|cfg|cfg.username.clone()).unwrap_or_default(),..Default::default()};
         self.calendar.note.clear();self.calendar.note_error=false;
     }
 
@@ -936,7 +942,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8].get(page).copied().unwrap_or(0);
             self.open_settings();
             return;
         }
@@ -1116,7 +1122,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==8&&self.desktop_tools.week {236.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1237,7 +1243,23 @@ impl App {
                 let mail_body=self.page==5 && self.mail.open_uid.is_some()
                     && Rect::from_min_max(Pos2::new(46.0,104.0),Pos2::new(374.0,194.0)).contains(cursor);
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_body || mail_list {self.wheel_delta=0.0;}
+                let near_left=cursor.x<=36.0;
+                let near_right=cursor.x>=PW-36.0;
+                if near_left || near_right {
+                    // 两侧边缘延续原来的滚轮方向：向下到下一页，向上到上一页。
+                    if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
+                    self.wheel_at=self.t;
+                    self.wheel_delta+=scroll;
+                    if self.wheel_delta.abs()>=8.0 {
+                        let next=self.wheel_delta<0.0;
+                        self.wheel_delta=0.0;
+                        if self.t-self.wheel_page_at>=0.20 {
+                            self.navigate_page(next);
+                            self.wheel_page_at=self.t;
+                        }
+                        ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
+                    }
+                } else if mail_body || mail_list {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
@@ -1256,15 +1278,16 @@ impl App {
                                 =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
                             _=>None,
                         };
-                        let scrolled=list.is_some_and(|(first,max)|{
+                        let server_list=self.page==13
+                            && Rect::from_min_max(Pos2::new(55.0,31.0),Pos2::new(340.0,118.0)).contains(cursor);
+                        let scrolled=if server_list {
+                            self.desktop_tools.scroll_server(next)
+                        } else {list.is_some_and(|(first,max)|{
                             let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
                             let changed=target!=*first;*first=target;changed
-                        });
-                        // 内容区优先滚动列表，空列表和边界继续翻页；连续滚动保留短暂间隔。
-                        if !scrolled && !calendar_body && self.t-self.wheel_page_at>=0.20 {
-                            self.navigate_page(next);
-                            self.wheel_page_at=self.t;
-                        }
+                        })};
+                        // 中间区域只负责纵向内容滚动；到达边界后停留在当前页，页面切换交给左右边缘滚轮。
+                        let _ = (scrolled,calendar_body);
                         ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
                     }
                 }
@@ -1637,11 +1660,22 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+        // Observe pointer movement without consuming clicks on the page controls.
+        if c.live && !self.is_editing() {
+            let events=c.ui.ctx().input(|i|i.events.clone());
+            for event in events {if let egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,..}=event {
+                if pressed {self.page_swipe_start=c.rect(36.0,31.0,347.0,81.0).contains(pos).then_some(pos);}
+                else if let Some(start)=self.page_swipe_start.take() {
+                    let delta=pos-start;
+                    if delta.x.abs()>55.0*c.s && delta.x.abs()>delta.y.abs()*1.5 {self.navigate_page(delta.x<0.0);}
+                }
+            }}
+        }
         let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){if self.page>=8 {self.desktop_tools.open=true;self.desktop_tools.tab=self.page-8;} else {self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -1676,6 +1710,12 @@ impl App {
         let base = 25.0;
         let (a, b, col) = match page {
             0 | CALENDAR_PAGE => return,
+            8 => ("我的", "课表", theme::BLUE),
+            9 => ("剪贴板", "历史", theme::GREEN),
+            10 => ("下载", "进度", theme::BLUE),
+            11 => ("快捷", "启动", theme::CYAN),
+            12 => ("系统", "性能", theme::SOFT_GREEN),
+            13 => ("服务器", "任务", theme::CYAN),
             1 => ("番茄", "专注", theme::RED_TOP),
             2 => ("饮水", "提醒", theme::BLUE),
             3 => ("置物架", "", theme::WHITE),
@@ -1739,6 +1779,7 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            8..=13 => self.desktop_native_page(page-8,c),
             _ => self.page_settings(c),
         }
     }
