@@ -547,7 +547,7 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     unsafe {
         if on {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let value = format!("\"{}\"", exe.display());
+            let value = format!("\"{}\" --autostart", exe.display());
             let utf16 = wide(&value);
             let bytes = std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2);
             let key = run_key().ok_or_else(|| "打不开 HKCU\\Run".to_string())?;

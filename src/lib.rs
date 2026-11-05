@@ -15,6 +15,7 @@ pub mod calendar;
 mod calendar_ui;
 mod local_calendar;
 mod calendar_editor;
+mod calendar_tasks;
 pub mod glass;
 pub mod icons;
 pub mod input;
@@ -44,6 +45,8 @@ mod updates;
 
 #[cfg(windows)]
 pub mod native;
+#[cfg(windows)]
+pub mod url_drop;
 #[cfg(windows)]
 pub mod tray;
 

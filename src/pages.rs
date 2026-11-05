@@ -539,7 +539,9 @@ impl App {
     // ================= 待办 =================
     pub(crate) fn page_todo(&mut self, c: &Card, env: &Env, _cmds: &mut Vec<Cmd>) {
         let done = self.todos.items.iter().filter(|t|t.done_on.is_some()).count();
-        let total = self.todos.items.len();
+        let local_total = self.todos.items.len();
+        let total = local_total + self.calendar_tasks.items.len();
+        let done = done + self.calendar_tasks.items.iter().filter(|i|self.calendar_tasks.done.contains(&crate::calendar_tasks::State::key(i))).count();
         let pop = self.todo_pop.pos.abs().min(0.4);
         let hc = c.scaled(60.0, 50.0, 1.0 + pop * 0.25);
         let w = hc.text(42.0, 61.0, &format!("{done}"), size::HERO, W::Bold, if done > 0 && done == total { theme::GREEN } else { theme::WHITE }, H::Left);
@@ -585,6 +587,23 @@ impl App {
                 if Some(i) == self.editing {
                     continue;
                 }
+                if i >= local_total {
+                    let index=i-local_total;
+                    let item=self.calendar_tasks.items[index].clone();
+                    let y=row_y(row);
+                    let checked=self.calendar_tasks.done.contains(&crate::calendar_tasks::State::key(&item));
+                    c.ring(212.0,y,5.2,1.3,if checked{theme::GREEN}else{theme::BLUE});
+                    if checked{paint::check(c,212.0,y,6.0,1.0,1.4,theme::GREEN);}
+                    let title=format!("日历 · {}",item.event.title.replace(['\r','\n']," "));
+                    c.text(223.0,y+3.8,&c.fit(&title,size::BODY,W::Regular,105.0),size::BODY,W::Regular,if checked{theme::GRAY}else{theme::WHITE},H::Left);
+                    let r=c.hit(202.0,y-10.0,128.0,20.0,("calendar-task",index)).on_hover_text(format!("个人日历 · {}\n{}\n勾选仅标记本机完成",item.event.title,item.event.at));
+                    if r.clicked(){self.calendar_tasks.toggle(index);}
+                    if !item.readonly {
+                        paint::pencil(c,343.0,y,10.0,theme::GRAY);
+                        if c.hit(332.0,y-9.0,37.0,18.0,("calendar-task-edit",index)).on_hover_text("编辑或删除日历日程").clicked(){self.calendar_tasks.edit(Some(index));}
+                    }else{c.text(361.0,y+3.0,"只读",8.0,W::Regular,theme::GRAY,H::Right);}
+                    row+=1;shown+=1;continue;
+                }
                 let item = self.todos.items[i].clone();
                 let y = row_y(row);
                 let r = c.hit(202.0, y - 10.0, 169.0, 20.0, ("todo", i, item.text.as_str()));
@@ -599,7 +618,7 @@ impl App {
                     c.circle(212.0, y, 6.0 * anim::ease_out_cubic(ct.min(1.0) / 0.6).min(1.0), theme::GREEN);
                     paint::check(c, 212.0, y, 6.0, smoothstep(0.3, 1.0, ct), 1.4, Color32::BLACK);
                 }
-                let text = c.fit(&item.text, size::BODY, W::Regular, 104.0);
+                let text = c.fit(&format!("本地 · {}",item.text), size::BODY, W::Regular, 104.0);
                 r.clone().on_hover_text(format!("{}{}",item.text,item.due.as_ref().map(|d|format!("\n提醒：{d}")).unwrap_or_default()));
                 let tcol = mix(Color32::from_gray(235), Color32::from_gray(110), ct);
                 let tw = c.text(223.0, y + 3.8, &text, size::BODY, W::Regular, tcol, H::Left);
@@ -639,13 +658,8 @@ impl App {
             }
         }
 
-        if add.clicked() {
-            self.todo_first=0;
-            self.adding = true;
-            self.editing = None;
-            self.buf.clear();
-            self.todo_input_focused=false;
-        }
+        if !self.calendar_tasks.error.is_empty(){c.text(42.0,90.0,&c.fit(&self.calendar_tasks.error,8.0,W::Regular,145.0),8.0,W::Regular,theme::RED,H::Left);}
+        if add.clicked() { self.calendar_tasks.edit(None); }
         if edit.clicked() && can_edit {
             if let Some(i) = self.todos.items.iter().position(|t| t.done_on.is_none()) {
                 self.editing = Some(i);

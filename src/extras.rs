@@ -873,8 +873,7 @@ impl App {
         ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([690.0,560.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
             let dark=self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx));
             let original_style=ctx.style();
-            let mut style=(*original_style).clone();
-            style.visuals=if dark{egui::Visuals::dark()}else{egui::Visuals::light()};
+            let style=crate::settings_theme::island_style(&original_style,dark);
             ctx.set_style(style);
             ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if dark{egui::SystemTheme::Dark}else{egui::SystemTheme::Light}));
             if self.settings.settings_theme==crate::settings_theme::SettingsTheme::System {

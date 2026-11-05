@@ -209,6 +209,7 @@ impl Window {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
+        if let Err(e)=crate::url_drop::install(hwnd,cc.egui_ctx.clone()){eprintln!("[drop] OLE registration failed: {}",e.code());}
         let hook = unsafe {
             apply_style(hwnd, false, false);
             let _=enable_alpha_composition(hwnd);

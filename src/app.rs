@@ -297,6 +297,7 @@ impl CalendarState {
 }
 
 pub struct App {
+    pub(crate) calendar_tasks: crate::calendar_tasks::State,
     pub(crate) desktop_tools: crate::desktop_tools::Tools,
     pub opts: Options,
     pub settings: model::Settings,
@@ -445,6 +446,7 @@ impl App {
         let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
         Self {
             desktop_tools: Default::default(),
+            calendar_tasks: Default::default(),
             opts,
             settings,
             todos: model::TodoList::load(),
@@ -1273,7 +1275,7 @@ impl App {
                         let list=match self.page {
                             CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_len.saturating_sub(4))),
                             4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
-                                =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
+                                =>Some((&mut self.todo_first,(self.todos.items.len()+self.calendar_tasks.items.len()).saturating_sub(3))),
                             3 if Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
                                 =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
                             _=>None,

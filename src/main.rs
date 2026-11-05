@@ -424,6 +424,12 @@ impl eframe::App for Shell {
         #[cfg(windows)] let autostart = self.autostart;
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
+        #[cfg(windows)]
+        for payload in daozai::url_drop::take(){match payload{
+            daozai::url_drop::Payload::Url(url)=>self.app.accept_download_url(url),
+            daozai::url_drop::Payload::Files(paths)=>{self.app.on_drop(paths);self.app.show_page(3);}
+        }}
+        self.app.calendar_tasks_ui(ctx);
         self.app.desktop_tools_ui(ctx);
         self.app.mail_reader_ui(ctx);
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
@@ -561,7 +567,7 @@ fn run() -> eframe::Result<()> {
         }
         return Ok(());
     }
-    diagnostics::startup("初始化图形窗口");
+    diagnostics::startup(if std::env::args().any(|a|a=="--autostart"){"Windows 登录自启：初始化图形窗口"}else{"手动启动：初始化图形窗口"});
     let viewport = egui::ViewportBuilder::default()
         .with_title("岛仔").with_icon(daozai::theme::app_icon())
         .with_inner_size([app::CANVAS_W, app::WIN_H])
