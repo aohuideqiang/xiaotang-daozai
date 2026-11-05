@@ -39,7 +39,7 @@ pub fn startup(stage:&str) {
     use std::io::Write;
     let directory=daozai::model::config_dir().join("diagnostics");
     if std::fs::create_dir_all(&directory).is_ok() {
-        let now=chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3 %:z");
+        let now=chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f %:z");
         let line=format!("{now} · v{} · pid={} · {stage}\n",env!("CARGO_PKG_VERSION"),std::process::id());
         let _=std::fs::write(directory.join("last-startup.log"),&line);
         let timeline=directory.join("startup-history.log");
