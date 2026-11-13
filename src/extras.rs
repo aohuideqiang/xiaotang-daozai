@@ -1520,10 +1520,12 @@ impl App {
                             settings_control_row_right(ui,"桌面工具",|ui|{
                                 if ui.button("打开课表、下载与服务器任务").clicked(){crate::plugins::desktop_tools::open(0);}
                             });
+                            settings_hint(ui,"课表、下载、快捷启动、系统性能、服务器任务；把链接拖进岛体也会直接下载。");
                             settings_control_row_right(ui,"个人日历",|ui|{
                                 if ui.button("新建或编辑日程").clicked(){crate::plugins::caldav::open_new();}
                             });
-                            settings_hint(ui,"二开功能都放在 plugins/ 目录里，核心只保留带 plugin: 注记的接入点。");
+                            settings_hint(ui,if crate::plugins::caldav::has_personal(){"已连接个人日历：日程页右上角「写日历」可同步写入。"}else{"在「日程」里选择「CalDAV」并填自建服务器地址即可连接。"});
+                            settings_hint(ui,"剪贴板在「置物架 → 剪贴板」分栏，文字记录、固定与清空都由岛仔自带。");
                         });
                     }
                     1=>{

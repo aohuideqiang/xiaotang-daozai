@@ -6,7 +6,7 @@
 mod tasks;
 mod write;
 
-pub(crate) use tasks::{count, done_count, open_editor, open_new, rows, toggle};
+pub(crate) use tasks::{count, done_count, has_personal, open_editor, open_new, rows, toggle};
 
 /// 当前同步或写入的提示；待办页只在非空时显示。
 pub(crate) fn error() -> String {

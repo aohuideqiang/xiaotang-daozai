@@ -100,6 +100,11 @@ pub(crate) fn open_new() {
     }
 }
 
+/// 是否已连接个人（自建）CalDAV 日历；日历页据此决定要不要显示「写日历」按钮。
+pub(crate) fn has_personal() -> bool {
+    crate::calendar::load_configs().iter().any(|config| config.provider == crate::calendar::Provider::Custom)
+}
+
 impl State {
     fn load() -> Self {
         let (done, completion_error) = match std::fs::read(crate::model::config_dir().join("calendar-completed.json")) {

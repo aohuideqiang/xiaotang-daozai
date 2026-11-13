@@ -273,6 +273,15 @@ impl App {
         let (add,b)=paint::capsule(c,101.0,9.0,46.0,18.0,"calendar-add-local",theme::BTN,theme::BTN_HOVER);
         b.centered_text(124.0,18.0,"＋ 新增",9.0,W::Regular,theme::WHITE,H::Center);
         if add.clicked(){self.open_calendar_editor(None);return;}
+        // [plugin: caldav] 连了个人（自建）日历后多一个「写日历」按钮，调用插件的条件写入。
+        if crate::plugins::caldav::has_personal() {
+            let (write,w)=paint::capsule(c,151.0,9.0,46.0,18.0,"calendar-write-personal",theme::BTN,theme::BTN_HOVER);
+            w.centered_text(174.0,18.0,"写日历",9.0,W::Regular,theme::WHITE,H::Center);
+            if write.on_hover_text("新增一条日程并同步到已连接的个人 CalDAV 日历").clicked(){
+                crate::plugins::caldav::open_new();
+                return;
+            }
+        }
         c.seg((155.0,36.0),(155.0,208.0),0.6,Color32::from_gray(38));
         let day=self.calendar.view.day;
         let weekday=["星期一","星期二","星期三","星期四","星期五","星期六","星期日"][day.weekday().num_days_from_monday() as usize];
