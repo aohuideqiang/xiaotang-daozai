@@ -419,6 +419,27 @@ mod tests{
     fn metadata()->String{format!("\"playOneTrackInPlayingList\",{}",serde_json::json!({"track":{"id":"123","name":"测试歌曲","artists":[{"name":"歌手"}],"duration":240000,"album":{"name":"专辑"}}}))}
     fn encode(s:&str)->Vec<u8>{let mut table=[0;256];for b in 0..=255{table[decode(b)as usize]=b;}s.bytes().map(|b|table[b as usize]).collect()}
     #[test]
+    fn changing_data_directory_does_not_keep_the_previous_log_offset(){
+        let dir=std::env::temp_dir().join(format!("daozai-elog-path-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let desktop=dir.join("desktop.elog");
+        let store=dir.join("store.elog");
+        let start=event(7,1000,&metadata())+&event(7,2000,"\"native播放资源load完成\",{\"songId\":\"123\"}");
+        std::fs::write(&desktop,encode(&(start.clone()+&event(7,2500,"\"setPlayingPosition\",90")))).unwrap();
+        std::fs::write(&store,encode(&(start+&event(7,2500,"\"setPlayingPosition\",20")))).unwrap();
+        // 同一个读取器先后读两份日志：目录变了必须从头读，不能沿用旧偏移量。
+        let mut reader=Reader::default();
+        let first=reader.read(&desktop,Some(7),3000).unwrap().position;
+        assert!((first-90.0).abs()<1.0,"普通目录读到 {first}");
+        let switched=reader.read(&store,Some(7),3000).unwrap().position;
+        assert!((switched-20.0).abs()<1.0,"切到商店目录后不能沿用旧偏移，读到 {switched}");
+        let advanced=reader.read(&store,Some(7),4000).unwrap().position;
+        assert!(advanced>switched && advanced-switched<3.0,"继续读取应只前进一点，读到 {advanced}");
+        std::fs::remove_file(desktop).unwrap();
+        std::fs::remove_file(store).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
     fn native_log_tracks_load_pause_resume_seek_and_ignores_other_processes(){
         let mut state=Playback::default();
         state.line(&event(7,1000,&metadata()),7,1000);assert!(state.snapshot(1500).is_none());

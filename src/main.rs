@@ -948,7 +948,12 @@ fn run() -> eframe::Result<()> {
     }
     #[cfg(windows)]
     std::thread::spawn(daozai::record_install_size);
-    diagnostics::startup("初始化图形窗口");
+    // [plugin: tray_startup] 自启带 --autostart，启动日志能区分登录自启和手动启动。
+    diagnostics::startup(if std::env::args().any(|arg|arg=="--autostart"){
+        "Windows 登录自启：初始化图形窗口"
+    }else{
+        "手动启动：初始化图形窗口"
+    });
     let viewport = egui::ViewportBuilder::default()
         .with_title("岛仔").with_icon(daozai::theme::app_icon())
         .with_inner_size([app::CANVAS_W, app::WIN_H])

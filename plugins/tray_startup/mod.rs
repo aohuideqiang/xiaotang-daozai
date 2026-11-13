@@ -17,3 +17,34 @@ pub(crate) fn retry(limit: std::time::Duration, mut attempt: impl FnMut() -> boo
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+/// 在指定进程里找标题为「岛仔」的主窗口。
+///
+/// 不能只按标题找：同时开着别的版本或别的程序时，`FindWindowW` 可能拿到别人的窗口，
+/// 进程号对不上就永远不会激活。按进程号筛选后再比标题，就不会认错。
+#[cfg(windows)]
+pub(crate) fn island_window(pid: u32) -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, GetWindowThreadProcessId};
+    struct Search {
+        pid: u32,
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> BOOL {
+        let search = &mut *(param.0 as *mut Search);
+        let mut window_pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+        if window_pid == search.pid {
+            let mut title = [0u16; 64];
+            let length = GetWindowTextW(hwnd, &mut title).max(0) as usize;
+            if String::from_utf16_lossy(&title[..length]) == "岛仔" {
+                search.found = Some(hwnd);
+                return BOOL(0);
+            }
+        }
+        BOOL(1)
+    }
+    let mut search = Search { pid, found: None };
+    unsafe { let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut _ as isize)); }
+    search.found
+}

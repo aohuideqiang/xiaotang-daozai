@@ -655,11 +655,11 @@ pub fn activate_existing(calendar:bool)->bool {
 
 fn activate_existing_once(calendar:bool)->bool {unsafe{
     let Ok(tray)=FindWindowW(w!("DaozaiTray"),PCWSTR::null()) else{return false;};
-    let Ok(window)=FindWindowW(PCWSTR::null(),w!("岛仔")) else{return false;};
-    let(mut tray_pid,mut window_pid)=(0,0);
+    let mut tray_pid=0;
     GetWindowThreadProcessId(tray,Some(&mut tray_pid));
-    GetWindowThreadProcessId(window,Some(&mut window_pid));
-    if tray_pid==0 || tray_pid!=window_pid{return false;}
+    if tray_pid==0{return false;}
+    // [plugin: tray_startup] 按进程找窗口：同时开着别的版本时，同名窗口不会被认错。
+    let Some(window)=crate::plugins::tray_startup::island_window(tray_pid) else{return false;};
     // 托盘有独立线程，能接收消息不代表界面线程仍可响应。
     if SendMessageTimeoutW(window,WM_NULL,WPARAM(0),LPARAM(0),
         SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,None).0==0{return false;}

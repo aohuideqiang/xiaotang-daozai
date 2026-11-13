@@ -99,13 +99,15 @@ cargo build --locked --release --bin daozai --target x86_64-pc-windows-gnu
 | `url_drop.rs` 链接/文件拖放 | `plugins/desktop_tools/drop.rs` |
 | `runtime/*.py` | `plugins/desktop_tools/runtime/*.py` |
 | 岛体上的六个页面 | 并入桌面工具窗口（上游页面数组固定 9 页，不扩数组） |
+| 待办文字前缀「本地 ·」 | 未移植：上游测试按待办原文断言，且日历行已有「日历 ·」前缀区分 |
 | 剪贴板页面 | 上游置物架已有剪贴板分栏，不再重复采集 |
 | `media_seeking` 串行化与「跳转中…」 | 未移植：上游 `ControlWorker` 已合并连续跳转，不会重复排队 |
 | QQ 暂停状态滞后导致假失败 | `plugins/music_seek/`（本次补上） |
 | `tray` 自启参数 `--autostart` | `plugins/tray_startup` |
 | 激活已有窗口时等待首次启动 | `plugins/tray_startup::retry` |
-| 托盘按 pid 查找窗口 | 未移植：上游按标题 + pid 校验已覆盖，极少冲突 |
+| 托盘按 pid 查找窗口 | `plugins/tray_startup::island_window`（按进程号找窗口，同名程序不会认错） |
 | `diagnostics` 启动日志格式 | `plugins/startup_log` |
+| 自启日志区分「登录自启 / 手动启动」 | `src/main.rs` 接入 + `plugins/tray_startup` |
 | `settings_theme::island_style` | `plugins/ui.rs` |
 | `build.rs` 的 windres 分支 | `plugins/branding/build_resources.rs` |
 | `Cargo.toml` 的 Windows 特性 | `Cargo.toml`（接入） |
