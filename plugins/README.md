@@ -74,3 +74,42 @@ cargo build --locked --release --bin daozai --target x86_64-pc-windows-gnu
 - 个人 CalDAV：上游只读，插件补上新建、修改、删除；完成状态只存本机。
 - 桌面工具是独立窗口，不占用岛体固定的页面数组，避免影响上游的页面管理。
 - 剪贴板：上游置物架已有完整的剪贴板分栏（含固定、排除密码内容），插件不再重复采集。
+
+## 上一版二开（v0.6.50 基线）逐项对照
+
+旧二开是对上游 `b93dd84`（v0.6.50）打的一批补丁，上游后来重建了不少同类功能。
+逐项核对后的去向如下；「未移植」的都写了原因，不需要再找回来。
+
+| 旧二开内容 | 现在的位置 |
+| --- | --- |
+| `src/netease_paths.rs` 商店版日志目录 | `plugins/netease/paths.rs` |
+| `netease_playback` 目录切换时重置偏移 | `src/netease_playback.rs`（接入点内） |
+| `player_seek` 网易云播放条点击 | `plugins/netease/seek.rs` |
+| `smtc::seek` 网易云分支 | `src/smtc.rs` 委托 `plugins::netease::seek` |
+| `netease_timeline` 额外构建时间戳 | 未移植：跳转改用日志回读，不再依赖客户端版本 |
+| 自定义 CalDAV（`Provider::Custom`、地址输入） | 上游已内置（CalDAV / iCloud / Exchange） |
+| `Config::from_input` / `validate_server` | 上游 `normalize_server` + 设置页已内置 |
+| 凭据按服务器隔离 | `src/calendar.rs` 的 `credential_name`（接入点） |
+| 回环地址（隧道/本机）失败提示 | `src/calendar.rs` 的 `Failure::unreachable` |
+| 发现流程 home == principal 的修正 | 上游已修（队列 + calendar-home-set） |
+| `calendar/write.rs` 条件写入 | `plugins/caldav/write.rs` |
+| `calendar_tasks.rs` 今日日程并入待办 | `plugins/caldav/tasks.rs` + `src/pages.rs`（接入点） |
+| 日程页「课表」小入口 | 由桌面工具窗口统一入口替代 |
+| `desktop_tools.rs` 六个页面 | `plugins/desktop_tools/`（独立窗口六个分页） |
+| `url_drop.rs` 链接/文件拖放 | `plugins/desktop_tools/drop.rs` |
+| `runtime/*.py` | `plugins/desktop_tools/runtime/*.py` |
+| 岛体上的六个页面 | 并入桌面工具窗口（上游页面数组固定 9 页，不扩数组） |
+| 剪贴板页面 | 上游置物架已有剪贴板分栏，不再重复采集 |
+| `media_seeking` 串行化与「跳转中…」 | 未移植：上游 `ControlWorker` 已合并连续跳转，不会重复排队 |
+| QQ 暂停状态滞后导致假失败 | `plugins/music_seek/`（本次补上） |
+| `tray` 自启参数 `--autostart` | `plugins/tray_startup` |
+| 激活已有窗口时等待首次启动 | `plugins/tray_startup::retry` |
+| 托盘按 pid 查找窗口 | 未移植：上游按标题 + pid 校验已覆盖，极少冲突 |
+| `diagnostics` 启动日志格式 | `plugins/startup_log` |
+| `settings_theme::island_style` | `plugins/ui.rs` |
+| `build.rs` 的 windres 分支 | `plugins/branding/build_resources.rs` |
+| `Cargo.toml` 的 Windows 特性 | `Cargo.toml`（接入） |
+| README 定制说明、`docs/KARMA-*.md` | `KARMA.md` + 各插件 README |
+| `examples/calendar-write-check.rs` | 未移植：写入 API 在插件内部，不对外暴露 |
+| 删除 `ui_tests.rs` / `tests/` | 不采用：保留上游回归测试 |
+| CI 改为只编译 | 不采用：保留上游 CI |

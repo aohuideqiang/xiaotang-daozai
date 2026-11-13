@@ -511,21 +511,22 @@ pub fn seek(seconds:f64,source:&str)->bool {
         }
         let start=std::time::Instant::now();
         let timeout=if system{Duration::from_millis(600)}else{Duration::from_secs(2)};
-        let mut pause_requested=false;
+        let mut pause_attempts=0;
         while start.elapsed()<timeout {
             std::thread::sleep(Duration::from_millis(100));
-            if timeline().is_some_and(|(current,total)|(total-duration).abs()<1.5 && seek_arrived(current,target,start.elapsed().as_secs_f64())){
-                // QQ 的原生进度条会自动续播；确认续播事件后再恢复暂停，避免命令被覆盖。
-                if paused_qq && session.as_ref().and_then(|s|s.GetPlaybackInfo().ok()).and_then(|i|i.PlaybackStatus().ok())
-                    ==Some(windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing){
-                    if !pause_requested {
-                        if session.as_ref().and_then(|s|media_result(||s.TryTogglePlayPauseAsync()))!=Some(true){return false;}
-                        pause_requested=true;
-                    }
-                    continue;
-                }
-                return true;
+            let arrived=timeline().is_some_and(|(current,total)|(total-duration).abs()<1.5 && seek_arrived(current,target,start.elapsed().as_secs_f64()));
+            if !arrived {continue;}
+            if !paused_qq {return true;}
+            // QQ 的原生进度条会自动续播；暂停状态的回报比位置慢一拍。
+            // [plugin: music_seek] 最多再补两次暂停，之后按成功处理，不能把已到位的跳转判成失败。
+            let playing=session.as_ref().and_then(|s|s.GetPlaybackInfo().ok()).and_then(|i|i.PlaybackStatus().ok())
+                ==Some(windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
+            if crate::plugins::music_seek::pause_needed(playing,pause_attempts) {
+                if session.as_ref().and_then(|s|media_result(||s.TryTogglePlayPauseAsync()))!=Some(true){return false;}
+                pause_attempts+=1;
+                continue;
             }
+            return true;
         }
     }
     false

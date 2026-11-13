@@ -18,6 +18,7 @@
 pub mod caldav;
 pub mod desktop_tools;
 pub mod island_gestures;
+pub mod music_seek;
 pub mod netease;
 pub mod startup_log;
 pub mod tray_startup;
