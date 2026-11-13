@@ -1514,6 +1514,17 @@ impl App {
                             ui.separator();
                             setting_row(ui,"全屏时隐藏","游戏、视频和演示全屏时隐藏",&mut self.settings.hide_fullscreen);
                         });
+                        // [plugin: entries] 插件入口：桌面工具和个人日历写入都在这里打开。
+                        settings_label(ui,"插件");
+                        settings_card(ui,|ui|{
+                            settings_control_row_right(ui,"桌面工具",|ui|{
+                                if ui.button("打开课表、下载与服务器任务").clicked(){crate::plugins::desktop_tools::open(0);}
+                            });
+                            settings_control_row_right(ui,"个人日历",|ui|{
+                                if ui.button("新建或编辑日程").clicked(){crate::plugins::caldav::open_new();}
+                            });
+                            settings_hint(ui,"二开功能都放在 plugins/ 目录里，核心只保留带 plugin: 注记的接入点。");
+                        });
                     }
                     1=>{
                         settings_label(ui,"歌词");

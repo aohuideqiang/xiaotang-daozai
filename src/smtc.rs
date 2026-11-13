@@ -8,7 +8,7 @@ mod apple_music;
 mod netease_timeline;
 #[cfg(windows)]
 #[path="netease_playback.rs"]
-mod netease_playback;
+pub(crate) mod netease_playback;
 #[cfg(windows)]
 #[path="bodian.rs"]
 pub(crate) mod bodian;
@@ -474,12 +474,17 @@ pub fn control(cmd: Transport,source:&str) {
 #[cfg(not(windows))]
 pub fn control(_cmd: Transport,_source:&str) {}
 
+/// [plugin: netease] 正在播放的网易云进程号，插件用它确认窗口归属。
+pub(crate) fn netease_pid()->Option<u32> { netease_playback::process_id() }
+
 /// 跳转在工作线程执行；专用回退必须回读实际位置，避免播放器接口假成功。
 #[cfg(windows)]
 pub fn seek(seconds:f64,source:&str)->bool {
     if !seconds.is_finite() || seconds<0.0{return false;}
     static LOCK:Mutex<()>=Mutex::new(());
     let Ok(_lock)=LOCK.lock()else{return false;};
+    // [plugin: netease] 网易云 3.x 没有系统进度接口，插件用播放条点击 + 日志回读实现。
+    if source.eq_ignore_ascii_case("cloudmusic.exe"){return crate::plugins::netease::seek(seconds);}
     if source.eq_ignore_ascii_case("kwmusic.exe"){return kuwo::seek(seconds);}
     if matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe") && kugou_control::seek(seconds){return true;}
     let _apartment=init_winrt();

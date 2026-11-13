@@ -574,7 +574,8 @@ impl eframe::App for Shell {
                 Cmd::Media(t) => {
                     self.media_fast_until=Some(Instant::now()+Duration::from_secs(3));self.media_enabled.set_interval(smtc::POLL_FAST);
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
-                    let message=if source.eq_ignore_ascii_case("cloudmusic.exe"){"网易云暂未适配进度跳转，请在客户端调整"}
+                    // [plugin: netease] 网易云跳转由插件点击播放条并用本地日志回读确认。
+                    let message=if source.eq_ignore_ascii_case("cloudmusic.exe"){"未能确认跳转，请在播放器内调整进度"}
                         else if source.eq_ignore_ascii_case("bodian_pc.exe"){"波点音乐暂未适配进度跳转，请在客户端调整"}
                         else if source.eq_ignore_ascii_case("kwmusic.exe"){"酷我音乐暂未适配进度跳转，请在客户端调整"}
                         else{"播放器未完成跳转，请打开客户端后重试"};
@@ -700,6 +701,8 @@ impl eframe::App for Shell {
         #[cfg(not(windows))] let autostart = false;
         self.app.settings_ui(ctx, autostart);
         self.app.mail_reader_ui(ctx);
+        // [plugin] 每帧驱动插件：桌面工具窗口、个人日历、拖放进来的任务。
+        daozai::plugins::frame(ctx, &mut self.app);
         #[cfg(windows)] let repaint_after=if self.hidden{Duration::from_secs(1)}else{out.repaint_after};
         #[cfg(not(windows))] let repaint_after=out.repaint_after;
         schedule_repaint(ctx,repaint_after);

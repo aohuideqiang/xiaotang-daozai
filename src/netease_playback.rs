@@ -207,13 +207,15 @@ fn fetch_cover(url:&str)->Option<Arc<eframe::egui::ColorImage>>{
 }
 
 #[derive(Default)]
-pub(super) struct Reader {
+pub(crate) struct Reader {
     pid:u32,offset:u64,prefix:Vec<u8>,carry:Vec<u8>,skip_line:bool,
+    /// 当前读取的日志文件；目录变化时重置偏移，避免沿用上一份日志的播放进度。
+    path:Option<std::path::PathBuf>,
     playback:Playback,lookup:(Option<u64>,u64),cover:CoverCache,
     queue_print:Vec<Option<(std::time::SystemTime,u64)>>,
 }
 impl Reader {
-    pub(super) fn pending(&self)->bool {
+    pub(crate) fn pending(&self)->bool {
         self.pid!=0 && self.playback.media.song_id.is_some() && (!self.playback.ready || !self.playback.media.is_music())
     }
     fn ingest(&mut self,bytes:&[u8],now:u64,replay:bool){
@@ -233,11 +235,12 @@ impl Reader {
     }
     fn read(&mut self,path:&Path,pid:Option<u32>,now:u64)->Option<NowPlaying>{
         let Some(pid)=pid else{*self=Self::default();return None;};
-        if self.pid!=pid{*self=Self{pid,..Self::default()};}
-        let mut file=match File::open(path){Ok(file)=>file,Err(_)=>{*self=Self{pid,..Self::default()};return None;}};
+        // 日志目录换了（普通版 ↔ 商店版）也要从头读，不能沿用旧的偏移量。
+        if self.pid!=pid || self.path.as_deref()!=Some(path){*self=Self{pid,path:Some(path.to_owned()),..Self::default()};}
+        let mut file=match File::open(path){Ok(file)=>file,Err(_)=>{*self=Self{pid,path:Some(path.to_owned()),..Self::default()};return None;}};
         let size=file.metadata().ok()?.len();
         let mut prefix=vec![0;64.min(size as usize)];file.read_exact(&mut prefix).ok()?;
-        if size<self.offset || !prefix.starts_with(&self.prefix){*self=Self{pid,..Self::default()};}
+        if size<self.offset || !prefix.starts_with(&self.prefix){*self=Self{pid,path:Some(path.to_owned()),..Self::default()};}
         self.prefix=prefix;
         if size>self.offset{
             let start=self.offset.max(size.saturating_sub(MAX_READ));
@@ -261,10 +264,13 @@ impl Reader {
         }
         self.playback.snapshot(now)
     }
-    pub(super) fn poll(&mut self)->Option<NowPlaying>{
-        let path=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("NetEase/CloudMusic/cloudmusic.elog");
+    pub(crate) fn poll(&mut self)->Option<NowPlaying>{
+        let local=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        let pid=process_id();
+        // [plugin: netease] 商店版把日志放在包隔离目录，由插件挑选目录并回退普通安装版。
+        let path=crate::plugins::netease::log_path(&local,pid);
         let sampled=std::time::Instant::now();
-        let mut media=self.read(&path,process_id(),monotonic_millis())?;
+        let mut media=self.read(&path,pid,monotonic_millis())?;
         if self.cover.url==self.playback.artwork_url{media.artwork=self.cover.image.clone();}
         media.sampled_at=Some(sampled);Some(media)
     }
@@ -297,7 +303,7 @@ fn queue_track(root:&Path,id:u64)->Option<(NowPlaying,String)>{
     partial
 }
 
-fn process_id()->Option<u32>{
+pub(crate) fn process_id()->Option<u32>{
     use windows::{core::{w,PCWSTR},Win32::UI::WindowsAndMessaging::{FindWindowW,GetWindowThreadProcessId}};
     unsafe{let window=FindWindowW(w!("OrpheusBrowserHost"),PCWSTR::null()).ok()?;let mut pid=0;GetWindowThreadProcessId(window,Some(&mut pid));(pid!=0).then_some(pid)}
 }

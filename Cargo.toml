@@ -60,13 +60,18 @@ tungstenite = { version = "0.28", default-features = false, features = ["handsha
 clipboard-win = "5.4.3"
 wgpu = { version = "24", default-features = false, features = ["dx12"] }
 memmap2 = "0.9.12"
+# [plugin: desktop_tools] 插件的 OLE 拖放目标与剪贴板格式需要这些接口。
+windows-core = "0.58"
 windows = { version = "0.58", features = [
+  "implement",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_SystemServices",
   "Win32_System_DataExchange",
   "Win32_Security",
   "Win32_Security_Cryptography",

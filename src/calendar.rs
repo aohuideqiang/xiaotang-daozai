@@ -152,6 +152,17 @@ impl Config {
     pub fn base(&self) -> String {
         self.server.clone().unwrap_or_else(|| self.provider.server().to_string())
     }
+
+    /// [plugin: caldav] 凭据按服务器隔离：自建服务的用户名区分大小写，
+    /// 不同服务器也不能共用同一份密码。
+    pub fn credential_name(&self) -> String {
+        if self.provider == Provider::Custom {
+            let origin = url::Url::parse(&self.base()).map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| self.base());
+            format!("{}:{}:{}", self.provider.key(), origin, self.username.trim())
+        } else {
+            format!("{}:{}", self.provider.key(), self.username.trim().to_ascii_lowercase())
+        }
+    }
 }
 
 /// 自定义 CalDAV 地址：去掉空白，补全 https://；只接受 https（本机回环地址允许 http）。
@@ -253,7 +264,7 @@ pub fn save_connection(cfg: &Config, password: &str, old: Option<&Config>) -> Re
     let saved = load_configs().into_iter().find(|saved| saved.provider == cfg.provider);
     let old = saved.as_ref().or(old.filter(|old| old.provider == cfg.provider));
     let same_account = old.is_some_and(|old|
-        old.provider == cfg.provider && old.username.eq_ignore_ascii_case(&cfg.username));
+        old.provider == cfg.provider && old.credential_name() == cfg.credential_name());
     let previous_password = secrets::load(cfg).ok();
     secrets::save(cfg, password)?;
     if let Err(error) = save_config(cfg) {
@@ -303,7 +314,7 @@ pub mod secrets {
     }
 
     fn name(cfg: &super::Config) -> String {
-        format!("{}:{}", cfg.provider.key(), cfg.username.trim().to_ascii_lowercase())
+        cfg.credential_name()
     }
 }
 
@@ -433,13 +444,26 @@ impl Failure {
         Self { status: None, message: "连不上服务器，检查网络".into(), request_url: None,report:None }
     }
 
+    /// [plugin: caldav] 本机回环地址上的日历多半是隧道或本地服务，
+    /// 失败原因和「网络不好」不是一回事，直接提示检查隧道或日历程序。
+    fn unreachable(cfg: &Config, detail: &str) -> Self {
+        let local = url::Url::parse(&cfg.base()).ok()
+            .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())))
+            .unwrap_or(false);
+        if local {
+            Self { status: None, message: "连不上本机日历服务，请确认 CalDAV 隧道或日历程序已启动".into(), request_url: None, report: None }
+        } else {
+            Self::transport(detail)
+        }
+    }
+
     fn text(message: impl Into<String>) -> Self {
         Self { status: None, message: message.into(), request_url: None,report:None }
     }
     fn with_report(mut self,report:ReadReport)->Self{self.report=Some(report);self}
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
         .timeout_read(Duration::from_secs(20))
@@ -469,7 +493,7 @@ fn dav(
 }
 
 /// 返回最终地址，让发现流程按重定向后的地址解析相对路径。
-fn dav_response(
+pub(crate) fn dav_response(
     agent: &ureq::Agent, method: &str, url: &str, depth: &str,
     body: &str, cfg: &Config, password: &str,
 ) -> Result<(String,String), Failure> {
@@ -493,9 +517,9 @@ fn dav_response(
                     .map_err(|_|Failure::text("日历重定向地址无效"))?;
             }
             Ok(r) if r.status()>=300=>return Err(Failure::status(cfg.provider,r.status()).at_url(&target)),
-            Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::transport(&e.to_string())),
+            Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::unreachable(cfg,&e.to_string())),
             Err(ureq::Error::Status(code,_))=>return Err(Failure::status(cfg.provider,code).at_url(&target)),
-            Err(e)=>return Err(Failure::transport(&e.to_string())),
+            Err(e)=>return Err(Failure::unreachable(cfg,&e.to_string())),
         }
     }
     Err(Failure::text("日历重定向次数过多"))
@@ -518,7 +542,7 @@ fn calendar_data_request(_provider: Provider, start: &str, end: &str) -> String 
     format!(r#"<c:calendar-data><c:expand start="{start}" end="{end}"/></c:calendar-data>"#)
 }
 
-fn report_body(provider: Provider, start: &str, end: &str) -> String {
+pub(crate) fn report_body(provider: Provider, start: &str, end: &str) -> String {
     let data=calendar_data_request(provider,start,end);
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -674,7 +698,7 @@ fn report_resource_refs(xml:&str,href:&str)->Result<String,Failure> {
     Ok(refs)
 }
 
-fn discover_calendars(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<(Vec<String>,ReadReport), Failure> {
+pub(crate) fn discover_calendars(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<(Vec<String>,ReadReport), Failure> {
     let base = ensure_slash(cfg.base().trim());
     let root=path_of(&base)=="/";
     if let Some(calendar)=discover_at(agent,cfg,password,&base,"1")? {
@@ -867,7 +891,7 @@ fn ical_lines(text:&str)->Vec<String>{
     }}lines
 }
 
-fn calendar_data(xml: &str) -> Vec<String> {
+pub(crate) fn calendar_data(xml: &str) -> Vec<String> {
     let Ok(re) = regex::Regex::new(r"(?is)<(?:[a-z0-9]+:)?calendar-data\b[^>]*>(.*?)</(?:[a-z0-9]+:)?calendar-data>") else {
         return Vec::new();
     };
@@ -917,7 +941,7 @@ fn unescape_xml(v: &str) -> String {
     }).trim_matches('\u{feff}').to_string()
 }
 
-fn report_status_error(xml:&str)->Option<u16>{
+pub(crate) fn report_status_error(xml:&str)->Option<u16>{
     regex::Regex::new(r"(?i)<(?:[a-z0-9]+:)?status[^>]*>\s*HTTP/\S+\s+(\d{3})").unwrap().captures_iter(xml)
         .filter_map(|c|c[1].parse::<u16>().ok()).find(|code|*code>=400)
 }

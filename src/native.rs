@@ -349,6 +349,10 @@ impl Window {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
+        // [plugin: desktop_tools] 拖放目标换成插件版本：链接直接下载，文件仍然进置物架。
+        if let Err(error)=crate::plugins::desktop_tools::install_drop(hwnd,cc.egui_ctx.clone()){
+            eprintln!("[drop] OLE 注册失败：{error}");
+        }
         let hook = unsafe {
             apply_style(hwnd, false, false);
             let _=enable_alpha_composition(hwnd);

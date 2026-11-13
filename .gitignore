@@ -13,3 +13,9 @@
 *.key
 .DS_Store
 Thumbs.db
+
+# [plugin] 本机构建工具链与定制版可执行文件
+/.tools/
+/KarMa-岛仔.exe
+/KarMa-岛仔.exe.bak-*
+

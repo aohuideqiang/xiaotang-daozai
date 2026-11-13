@@ -33,6 +33,9 @@ pub mod clipboard;
 pub mod side_dock;
 mod task_picker;
 pub mod model;
+// [plugin] 二开代码放在项目根目录的 plugins/，不混进上游的 src/。
+#[path = "../plugins/mod.rs"]
+pub mod plugins;
 pub mod renderer;
 pub mod otp;
 pub mod quota;

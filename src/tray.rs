@@ -558,7 +558,8 @@ pub fn set_autostart(on: bool) -> Result<(), String> {
     unsafe {
         if on {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let value = format!("\"{}\"", exe.display());
+            // [plugin: tray_startup] 自启项带 --autostart，启动日志能区分登录自启和手动启动。
+            let value = crate::plugins::tray_startup::autostart_command(&exe.display().to_string());
             let utf16 = wide(&value);
             let bytes = std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2);
             let key = run_key().ok_or_else(|| "打不开 HKCU\\Run".to_string())?;
@@ -647,7 +648,12 @@ fn request_existing_window(hwnd:HWND,calendar:bool)->bool {unsafe{
         SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,Some(&mut reply)).0!=0 && reply==1
 }}
 
-pub fn activate_existing(calendar:bool)->bool {unsafe{
+pub fn activate_existing(calendar:bool)->bool {
+    // [plugin: tray_startup] 互斥体先于图形窗口和托盘建立，首次启动要等窗口就绪再激活。
+    crate::plugins::tray_startup::retry(Duration::from_secs(3),||activate_existing_once(calendar))
+}
+
+fn activate_existing_once(calendar:bool)->bool {unsafe{
     let Ok(tray)=FindWindowW(w!("DaozaiTray"),PCWSTR::null()) else{return false;};
     let Ok(window)=FindWindowW(PCWSTR::null(),w!("岛仔")) else{return false;};
     let(mut tray_pid,mut window_pid)=(0,0);

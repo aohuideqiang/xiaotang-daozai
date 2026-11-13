@@ -657,8 +657,8 @@ pub struct App {
     slide: Spring,
     dots: [Spring; 9],
     wheel_delta: f32,
-    wheel_at: f64,
     wheel_page_at: f64,
+    wheel_at: f64,
 
     // 拖入
     pub(crate) drag_hot: bool,
@@ -842,8 +842,8 @@ impl App {
             slide: Spring::new(0.0, 260.0, 0.92),
             dots: std::array::from_fn(|i| Spring::new(if i == initial_page { 16.0 } else { 4.0 }, 380.0, 0.86)),
             wheel_delta: 0.0,
-            wheel_at: -1.0,
             wheel_page_at: -1.0,
+            wheel_at: -1.0,
             drag_hot: false,
             drag_a: 0.0,
             drag_saved: None,
@@ -1797,44 +1797,58 @@ impl App {
                 self.navigate_page(right);
             } else if scroll!=0.0 {
                 let cursor=env.cursor.unwrap()-self.content_origin(win).to_vec2();
-                let mail_reading=self.page==5 && self.mail.open_uid.is_some();
-                let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                let music_volume=self.page==0 && (Rect::from_min_max(Pos2::new(354.0,106.0),Pos2::new(380.0,130.0)).contains(cursor)
-                    || self.music_volume_open && crate::pages::MUSIC_VOLUME_RECT.contains(cursor));
-                if mail_reading || mail_list || music_volume {self.wheel_delta=0.0;}
-                else {
-                    // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
-                    if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
-                    self.wheel_at=self.t;
-                    self.wheel_delta+=scroll;
-                    if self.wheel_delta.abs()>=8.0 {
-                        let next=self.wheel_delta<0.0;
+                // [plugin: island_gestures] 两侧边缘滚轮翻页；中间区域保持原来的列表滚动逻辑。
+                match crate::plugins::island_gestures::edge_wheel(cursor,self.t,scroll) {
+                    crate::plugins::island_gestures::WheelAction::Page(next)=>{
+                        self.navigate_page(next);
                         self.wheel_delta=0.0;
-                        let calendar_max=if self.page==CALENDAR_PAGE {self.calendar_scroll_max(env)}else{0};
-                        let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
-                        let clipboard_tab=self.page==3 && self.shelf_tab==1;
-                        let clipboard_body=clipboard_tab && Rect::from_min_max(Pos2::new(42.0,31.0),Pos2::new(377.0,124.0)).contains(cursor);
-                        let list=match self.page {
-                            CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
-                            4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
-                                =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
-                            3 if clipboard_body
-                                =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
-                            3 if !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
-                                =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
-                            _=>None,
-                        };
-                        let content_scrolls=list.as_ref().is_some_and(|(_,max)|*max>0);
-                        let scrolled=list.is_some_and(|(first,max)|{
-                            let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
-                            let changed=target!=*first;*first=target;changed
-                        });
-                        // 内容溢出时滚动列表并停在边界；未溢出时滚轮翻页。
-                        if !scrolled && !content_scrolls && !self.todo_choosing && self.t-self.wheel_page_at>=0.20 {
-                            self.navigate_page(next);
-                            self.wheel_page_at=self.t;
-                        }
                         ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
+                    }
+                    crate::plugins::island_gestures::WheelAction::Consume=>{
+                        self.wheel_delta=0.0;
+                        ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
+                    }
+                    crate::plugins::island_gestures::WheelAction::Pass=>{
+                        let mail_reading=self.page==5 && self.mail.open_uid.is_some();
+                        let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
+                        let music_volume=self.page==0 && (Rect::from_min_max(Pos2::new(354.0,106.0),Pos2::new(380.0,130.0)).contains(cursor)
+                            || self.music_volume_open && crate::pages::MUSIC_VOLUME_RECT.contains(cursor));
+                        if mail_reading || mail_list || music_volume {self.wheel_delta=0.0;}
+                        else {
+                            // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
+                            if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
+                            self.wheel_at=self.t;
+                            self.wheel_delta+=scroll;
+                            if self.wheel_delta.abs()>=8.0 {
+                                let next=self.wheel_delta<0.0;
+                                self.wheel_delta=0.0;
+                                let calendar_max=if self.page==CALENDAR_PAGE {self.calendar_scroll_max(env)}else{0};
+                                let calendar_body=self.page==CALENDAR_PAGE && Rect::from_min_max(Pos2::new(163.0,52.0),Pos2::new(378.0,208.0)).contains(cursor);
+                                let clipboard_tab=self.page==3 && self.shelf_tab==1;
+                                let clipboard_body=clipboard_tab && Rect::from_min_max(Pos2::new(42.0,31.0),Pos2::new(377.0,124.0)).contains(cursor);
+                                let list=match self.page {
+                                    CALENDAR_PAGE if calendar_body=>Some((&mut self.calendar.view.first,calendar_max)),
+                                    4 if Rect::from_min_max(Pos2::new(196.0,31.0),Pos2::new(377.0,124.0)).contains(cursor)
+                                        =>Some((&mut self.todo_first,self.todos.items.len().saturating_sub(3))),
+                                    3 if clipboard_body
+                                        =>Some((&mut self.clip_first,self.clipboard.lock().items.len().saturating_sub(crate::pages::CLIP_ROWS))),
+                                    3 if !clipboard_tab && Rect::from_min_max(Pos2::new(36.0,28.0),Pos2::new(383.0,128.0)).contains(cursor)
+                                        =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
+                                    _=>None,
+                                };
+                                let content_scrolls=list.as_ref().is_some_and(|(_,max)|*max>0);
+                                let scrolled=list.is_some_and(|(first,max)|{
+                                    let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
+                                    let changed=target!=*first;*first=target;changed
+                                });
+                                // 内容溢出时滚动列表并停在边界；未溢出时滚轮翻页。
+                                if !scrolled && !content_scrolls && !self.todo_choosing && self.t-self.wheel_page_at>=0.20 {
+                                    self.navigate_page(next);
+                                    self.wheel_page_at=self.t;
+                                }
+                                ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
+                            }
+                        }
                     }
                 }
             }
@@ -2742,6 +2756,8 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+        // [plugin: island_gestures] 左右滑动切页；进度条上的拖动不算，否则松手会先翻页。
+        if let Some(next)=crate::plugins::island_gestures::swipe(self,c){self.navigate_page(next);}
         let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));

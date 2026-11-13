@@ -883,6 +883,10 @@ impl App {
     pub(crate) fn page_todo(&mut self, c: &Card, env: &Env, _cmds: &mut Vec<Cmd>) {
         // 今天未完成优先，已完成沉底；不在今天的重复待办变暗显示、不能勾选。
         let (done, total) = self.todos.progress(&env.today);
+        // [plugin: caldav] 今日个人日历日程并入待办计数；完成状态只存在本机。
+        let (mut done, mut total) = (done, total);
+        total += crate::plugins::caldav::count();
+        done += crate::plugins::caldav::done_count();
         let order = self.todos.display_order(&env.today);
         let count = order.len();
         let pop = self.todo_pop.pos.abs().min(0.4);
@@ -1000,6 +1004,38 @@ impl App {
                 row += 1;
                 shown += 1;
             }
+            // [plugin: caldav] 今日个人日历日程接在本地待办后面；勾选只标记本机完成。
+            for item in crate::plugins::caldav::rows() {
+                if shown >= cap {
+                    break;
+                }
+                let y = row_y(row);
+                let r = c.hit(202.0, y - 10.0, 169.0, 20.0, ("calendar-task", item.key.as_str()));
+                let (hover, _) = c.hover_t(&r);
+                if hover > 0.01 {
+                    c.fill(202.0, y - 10.0, 169.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * hover) as u8));
+                }
+                c.ring(212.0, y, 5.2, 1.3, if item.done { theme::GREEN } else { theme::BLUE });
+                if item.done {
+                    paint::check(c, 212.0, y, 6.0, 1.0, 1.4, theme::GREEN);
+                }
+                let title = format!("日历 · {}", c.fit(&item.title, size::BODY, W::Regular, 104.0));
+                c.text(223.0, y + 3.8, &title, size::BODY, W::Regular, if item.done { theme::GRAY } else { theme::WHITE }, H::Left);
+                r.clone().on_hover_text(format!("个人日历 · {}\n{}\n勾选只标记本机完成", item.title, item.at));
+                if r.clicked() {
+                    crate::plugins::caldav::toggle(&item.key);
+                }
+                if !item.readonly {
+                    paint::pencil(c, 343.0, y, 10.0, theme::GRAY);
+                    if c.hit(332.0, y - 9.0, 37.0, 18.0, ("calendar-task-edit", item.key.as_str())).on_hover_text("编辑或删除日历日程").clicked() {
+                        crate::plugins::caldav::open_editor(Some(&item.key));
+                    }
+                } else {
+                    c.text(366.0, y + 3.0, "只读", size::TINY, W::Regular, theme::GRAY, H::Right);
+                }
+                row += 1;
+                shown += 1;
+            }
             let rest = count.saturating_sub(shown + self.editing.map(|_|1).unwrap_or(0));
             if self.todo_choosing{
                 c.text(370.0,120.0,if rest>0{"点选修改 · 滚轮查看"}else{"点击要修改的事项"},size::TINY,W::Regular,theme::GRAY,H::Right);
@@ -1008,6 +1044,11 @@ impl App {
             }
         }
 
+        // [plugin: caldav] 同步失败时在待办页给出提示。
+        let caldav_error = crate::plugins::caldav::error();
+        if !caldav_error.is_empty() {
+            c.text(370.0, 120.0, &c.fit(&caldav_error, size::TINY, W::Regular, 180.0), size::TINY, W::Regular, theme::RED, H::Right);
+        }
         if add.clicked() {
             self.todo_choosing=false;
             self.todo_first=0;

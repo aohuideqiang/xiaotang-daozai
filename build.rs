@@ -33,11 +33,16 @@ fn main() {
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=assets/daozai.ico");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=WINDRES");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("daozai.res");
     let Some(rc) = find_rc() else {
+        // [plugin: branding] GNU 构建用 windres 嵌入同样的图标和版本资源。
+        if gnu_resources(&out) {
+            return;
+        }
         println!("cargo:warning=rc.exe 未找到，跳过图标资源");
         return;
     };
@@ -53,3 +58,7 @@ fn main() {
     }
     println!("cargo:rustc-link-arg={}", out.display());
 }
+
+// [plugin: branding] 无 rc.exe 时用 windres 编 app.rc。
+include!("plugins/branding/build_resources.rs");
+
