@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, ERROR_ALREADY_EXISTS,
+    CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, BOOL, ERROR_ALREADY_EXISTS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
@@ -636,15 +636,38 @@ fn request_existing_window(hwnd:HWND,calendar:bool)->bool {unsafe{
         SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,Some(&mut reply)).0!=0 && reply==1
 }}
 
-pub fn activate_existing(calendar:bool)->bool {unsafe{
+fn activate_existing_once(calendar:bool)->bool {unsafe{
     let Ok(tray)=FindWindowW(w!("DaozaiTray"),PCWSTR::null()) else{return false;};
-    let Ok(window)=FindWindowW(PCWSTR::null(),w!("岛仔")) else{return false;};
-    let(mut tray_pid,mut window_pid)=(0,0);
+    let mut tray_pid=0;
     GetWindowThreadProcessId(tray,Some(&mut tray_pid));
-    GetWindowThreadProcessId(window,Some(&mut window_pid));
-    if tray_pid==0 || tray_pid!=window_pid{return false;}
+    if tray_pid==0{return false;}
+    struct Search { pid:u32, window:Option<HWND> }
+    unsafe extern "system" fn visit(hwnd:HWND,param:LPARAM)->BOOL {
+        let search=&mut *(param.0 as *mut Search);
+        let mut pid=0;GetWindowThreadProcessId(hwnd,Some(&mut pid));
+        if pid==search.pid {
+            let mut title=[0u16;64];let n=GetWindowTextW(hwnd,&mut title);
+            if String::from_utf16_lossy(&title[..n.max(0)as usize])=="岛仔" {
+                search.window=Some(hwnd);return BOOL(0);
+            }
+        }
+        BOOL(1)
+    }
+    let mut search=Search{pid:tray_pid,window:None};
+    let _=EnumWindows(Some(visit),LPARAM(&mut search as *mut _ as isize));
+    let Some(window)=search.window else{return false;};
     // 托盘有独立线程，能接收消息不代表界面线程仍可响应。
     if SendMessageTimeoutW(window,WM_NULL,WPARAM(0),LPARAM(0),
         SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,1500,None).0==0{return false;}
     request_existing_window(tray,calendar)
 }}
+
+pub fn activate_existing(calendar:bool)->bool {
+    let started=std::time::Instant::now();
+    loop {
+        if activate_existing_once(calendar){return true;}
+        // 互斥体先于图形窗口及托盘建立，允许首次启动完成初始化。
+        if started.elapsed()>=Duration::from_secs(3){return false;}
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

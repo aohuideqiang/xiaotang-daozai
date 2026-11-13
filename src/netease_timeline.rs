@@ -40,7 +40,7 @@ fn kugou_rejects_invalid_positions(){
 fn query(kugou:bool)->Option<(f64,f64)> {
     let (process,module,stamp,image_size,position_offset)=if kugou {
         ("KuGou.exe","kgplayer.dll",0x6ac9ec86,4587520,0x3949f8)
-    }else{("cloudmusic.exe","cloudmusic.dll",0x6ad712e1,41054208,0x21a74d8)};
+    }else{("cloudmusic.exe","cloudmusic.dll",0x6aca354c,41054208,0x21a74d8)};
     let mut ids=[0u32;4096];let mut needed=0;
     if unsafe{K32EnumProcesses(ids.as_mut_ptr(),std::mem::size_of_val(&ids) as u32,&mut needed)}==0{return None;}
     for &id in ids.iter().take(needed as usize/4) {
@@ -53,7 +53,10 @@ fn query(kugou:bool)->Option<(f64,f64)> {
             let pe=u32::from_le_bytes(read::<4>(p.0,base+60)?) as usize;
             if pe>4096{return None;}
             // 仅使用本机验证过的 PE 时间戳与映像大小，其他版本安全回退。
-            if u32::from_le_bytes(read::<4>(p.0,base+pe+8)?)!=stamp || u32::from_le_bytes(read::<4>(p.0,base+pe+80)?)!=image_size{return None;}
+            // 网易云 0x6aca354c/0x6ad712e1 两个同日构建已验证偏移相同。
+            let stamp_now=u32::from_le_bytes(read::<4>(p.0,base+pe+8)?);
+            let ok=if kugou {stamp_now==stamp} else {matches!(stamp_now,0x6aca354c|0x6ad712e1)};
+            if !ok || u32::from_le_bytes(read::<4>(p.0,base+pe+80)?)!=image_size{return None;}
             let position=f64::from_le_bytes(read::<8>(p.0,base+position_offset)?);
             if kugou {return valid_kugou_position(position).then_some((position,0.0));}
             let duration=f64::from_le_bytes(read::<8>(p.0,base+0x2214778)?);

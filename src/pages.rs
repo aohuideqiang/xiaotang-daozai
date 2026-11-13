@@ -15,6 +15,39 @@ fn mmss(secs: f64) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
+#[cfg(test)]
+mod music_interaction_tests {
+    use super::*;
+    #[test]
+    fn music_progress_click_and_drag_emit_actual_seek_targets() {
+        for lyrics in [false,true] {
+            let ctx=egui::Context::default();
+            let mut app=App::new(&ctx,crate::app::Options{fetch_lyrics:false,..Default::default()});
+            app.media=crate::smtc::NowPlaying{title:"进度测试".into(),source:"cloudmusic.exe".into(),duration:240.0,..Default::default()};
+            app.show_lyrics=lyrics;
+            let (x,width,y)=if lyrics{(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
+            let mut frame=|events:Vec<egui::Event>| {
+                let mut commands=Vec::new();
+                let _=ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(419.0,140.0))),events,..Default::default()},|ctx|{
+                    egui::CentralPanel::default().show(ctx,|ui|{
+                        app.page_music(&Card::new(ui,Pos2::ZERO,ui.max_rect()),&Env::default(),&mut commands);
+                    });
+                });
+                commands
+            };
+            let button=|pos,pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::NONE};
+            let a=Pos2::new(x+width*0.25,y);let b=Pos2::new(x+width*0.75,y);
+            frame(vec![egui::Event::PointerMoved(a)]);
+            frame(vec![button(a,true)]);
+            assert_eq!(frame(vec![button(a,false)]),vec![Cmd::Media(Transport::Seek(60.0))]);
+            frame(vec![button(a,true)]);
+            assert!(frame(vec![egui::Event::PointerMoved(b)]).is_empty());
+            let commands=frame(vec![button(b,false)]);
+            assert_eq!(commands,vec![Cmd::Media(Transport::Seek(180.0))]);
+        }
+    }
+}
+
 /// 由标题生成稳定的封面渐变色。
 fn cover_colors(title: &str) -> (Color32, Color32) {
     let mut h: u64 = 1469598103934665603;
@@ -70,18 +103,18 @@ impl App {
         let tc=if has {theme::WHITE}else{Color32::from_rgb(78,78,82)};
         let (bx,bw,by)=if with_lyrics {(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
         let bar=c.hit_drag(bx-4.0,by-7.0,bw+8.0,14.0,"m-seek");
-        let seek_position=if has && np.duration>0.0 && (bar.is_pointer_button_down_on() || bar.clicked() || bar.drag_stopped()) {
+        let seek_position=if has && !self.media_seeking && np.duration>0.0 && (bar.is_pointer_button_down_on() || bar.clicked() || bar.drag_stopped()) {
             bar.interact_pointer_pos().or_else(||ctx.input(|i|i.pointer.interact_pos()))
                 .map(|pointer|((c.to_local(pointer).x-bx)/bw).clamp(0.0,1.0) as f64*np.duration)
         }else{None};
         let position=seek_position.unwrap_or(np.position);
         let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
         let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
-        c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
+        c.text(44.0,time_y,&if self.media_seeking {"跳转中…".into()}else{mmss(position)},time_size,W::Regular,tc,H::Left);
         let remaining=if has && np.duration<=0.0{"--:--".into()}else{format!("-{}",mmss((np.duration-position).max(0.0)))};
         c.text(right,time_y,&remaining,time_size,W::Regular,tc,H::Right);
         let (bh,_)=c.hover_t(&bar);
-        let bh=if has {bh}else{0.0};
+        let bh=if has && !self.media_seeking {bh}else{0.0};
         let th=lerp(3.5,5.0,bh);
         c.fill(bx,by-th/2.0,bw,th,th/2.0,if has {Color32::from_gray(90)}else{theme::TRACK});
         if frac>0.0 {c.fill(bx,by-th/2.0,(bw*frac).max(th),th,th/2.0,theme::WHITE);}

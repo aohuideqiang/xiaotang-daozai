@@ -25,7 +25,7 @@ services=[
  ('timetable','课程看板','systemd','timetable.service'),
  ('watchpending','消息补发与提醒','systemd','watchpending.service'),
  ('sentinel','监控告警与自愈','systemd','sentinel.service'),
- ('health-check','网站容器健康检查','timer','health-check.timer'),
+ ('health-check','网站容器健康检查','systemd','health-check.service'),
 ]
 raw=call(['docker','ps','-a','--no-trunc','--format','{{.Names}}\t{{.State}}\t{{.Status}}'])
 containers=None if raw is None else [line.split('\t',2) for line in raw.splitlines() if len(line.split('\t',2))==3]
@@ -54,13 +54,61 @@ for name,description,kind,ident in services:
    elif active=='inactive' and enabled in ('disabled','masked','static',''): state,label='inactive','未启用'
    elif active=='inactive': state,label='down','已停止'
  rows.append({'name':name,'description':description,'state':state,'label':label})
-print(json.dumps({'services':rows},ensure_ascii=False))
+print(json.dumps({'connected':True,'services':rows},ensure_ascii=False))
 """
 from pathlib import Path
-connection=Path.home()/'AppData/Roaming/Daozai/server-connection.json'
 import json
-cmd=json.loads(connection.read_text(encoding='utf-8'))['ssh_command']
-r=subprocess.run(cmd,input=remote.encode('utf-8'),capture_output=True,timeout=45,creationflags=0x08000000 if sys.platform=='win32' else 0)
-if r.returncode:
- print('服务器总览暂时无法连接'); sys.exit(1)
-sys.stdout.reconfigure(encoding='utf-8'); print(r.stdout.decode('utf-8')[:50000])
+sys.stdout.reconfigure(encoding='utf-8')
+
+# 服务清单与远端保持一致，供「连不上」时仍能列出全部条目（逐项标连接失败）。
+CATALOG=[
+ ('hindsight-api','共享记忆 API'),
+ ('hindsight-db','记忆数据库'),
+ ('hindsight-ingestion','资料同步与入库'),
+ ('hindsight-control-plane','记忆管理界面'),
+ ('vaultwarden','密码库'),
+ ('radicale','个人日历'),
+ ('uptime-kuma','站点与容器监控'),
+ ('n8n','自动化工作流'),
+ ('astrbot','消息机器人'),
+ ('opengym-web-1','健身应用前端'),
+ ('opengym-api-1','健身应用接口'),
+ ('cloudflared','云端访问隧道'),
+ ('hermes-agent','Hermes 智能助手'),
+ ('timetable','课程看板'),
+ ('watchpending','消息补发与提醒'),
+ ('sentinel','监控告警与自愈'),
+ ('health-check','网站容器健康检查'),
+]
+
+def offline(reason):
+    rows=[{'name':n,'description':d,'state':'unknown','label':'连接失败'} for n,d in CATALOG]
+    print(json.dumps({'connected':False,'reason':reason,'services':rows},ensure_ascii=False))
+
+def main():
+    connection=Path.home()/'AppData/Roaming/Daozai/server-connection.json'
+    if not connection.exists():
+        offline('尚未配置服务器连接'); return
+    try:
+        cfg=json.loads(connection.read_text(encoding='utf-8'))
+        cmd=cfg['ssh_command']
+        if not cmd or not isinstance(cmd,list):
+            offline('服务器连接命令为空'); return
+    except Exception as e:
+        offline('服务器连接配置无效'); return
+    try:
+        r=subprocess.run(cmd,input=remote.encode('utf-8'),capture_output=True,timeout=45,creationflags=0x08000000 if sys.platform=='win32' else 0)
+    except Exception:
+        offline('服务器连接超时'); return
+    if r.returncode!=0:
+        offline('服务器暂时无法连接'); return
+    out=r.stdout.decode('utf-8')[:50000]
+    try:
+        data=json.loads(out)
+    except Exception:
+        offline('服务器返回无法解析'); return
+    data.setdefault('connected',True)
+    print(json.dumps(data,ensure_ascii=False))
+
+if __name__=='__main__':
+    main()

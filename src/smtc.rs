@@ -371,6 +371,18 @@ pub fn seek(seconds:f64,source:&str)->bool {
     let Ok(_lock)=LOCK.lock()else{return false;};
     if matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe") && kugou_control::seek(seconds){return true;}
     let _apartment=init_winrt();
+    if source.eq_ignore_ascii_case("cloudmusic.exe") {
+        let mut reader=netease_playback::Reader::default();
+        let Some(before)=reader.poll()else{return false;};
+        let target=seconds.min((before.duration-0.1).max(0.0));
+        if !player_seek::netease_seek(target,before.duration){return false;}
+        let started=std::time::Instant::now();
+        while started.elapsed()<Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(100));
+            if reader.poll().is_some_and(|current|current.song_id==before.song_id && seek_arrived(current.position,target,started.elapsed().as_secs_f64())){return true;}
+        }
+        return false;
+    }
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as Manager;
     let session=Manager::RequestAsync().ok().and_then(media_result).and_then(|mgr|mgr.GetSessions().ok())
         .and_then(|sessions|sessions.into_iter().find(|s|s.SourceAppUserModelId().ok().is_some_and(|id|id.to_string().eq_ignore_ascii_case(source))));
@@ -393,21 +405,22 @@ pub fn seek(seconds:f64,source:&str)->bool {
         }
         let start=std::time::Instant::now();
         let timeout=if system{Duration::from_millis(600)}else{Duration::from_secs(2)};
-        let mut pause_requested=false;
+        let mut pause_attempts=0;
         while start.elapsed()<timeout {
             std::thread::sleep(Duration::from_millis(100));
-            if timeline().is_some_and(|(current,total)|(total-duration).abs()<1.5 && seek_arrived(current,target,start.elapsed().as_secs_f64())){
-                // QQ 的原生进度条会自动续播；确认续播事件后再恢复暂停，避免命令被覆盖。
-                if paused_qq && session.as_ref().and_then(|s|s.GetPlaybackInfo().ok()).and_then(|i|i.PlaybackStatus().ok())
-                    ==Some(windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing){
-                    if !pause_requested {
-                        if session.as_ref().and_then(|s|s.TryTogglePlayPauseAsync().ok()).and_then(media_result)!=Some(true){return false;}
-                        pause_requested=true;
-                    }
-                    continue;
-                }
-                return true;
+            let arrived=timeline().is_some_and(|(current,total)|(total-duration).abs()<1.5 && seek_arrived(current,target,start.elapsed().as_secs_f64()));
+            if !arrived {continue;}
+            if !paused_qq {return true;}
+            // QQ 的原生进度条会自动续播；确认续播事件后恢复暂停，避免命令被覆盖。
+            let playing=session.as_ref().and_then(|s|s.GetPlaybackInfo().ok()).and_then(|i|i.PlaybackStatus().ok())
+                ==Some(windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
+            if playing && pause_attempts<2 {
+                if session.as_ref().and_then(|s|s.TryTogglePlayPauseAsync().ok()).and_then(media_result)!=Some(true){return false;}
+                pause_attempts+=1;
+                continue;
             }
+            // 位置已经到位：暂停已生效或已请求过，就不能因为暂停状态的滞后回报把成功当失败。
+            return true;
         }
     }
     false

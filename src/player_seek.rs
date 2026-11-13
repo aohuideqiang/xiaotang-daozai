@@ -84,6 +84,72 @@ pub(super) fn seek(source:&str,position:f64,duration:f64)->bool{
     })().is_some() }
 }
 
+/// 网易云 3.x 的底部播放条由 CEF 渲染，不提供系统 seek 或 UIA 控件。
+/// 主窗口最小化时渲染控件不存在，先把窗口临时透明还原（不激活、不闪现），
+/// 点击后再恢复原状态并重新最小化；全程不移动鼠标、不抢占前台。
+pub(super) fn netease_seek(position:f64,duration:f64)->bool {unsafe{
+    use std::time::{Duration,Instant};
+    use windows::core::{w,PCWSTR};
+    let Ok(host)=FindWindowW(w!("OrpheusBrowserHost"),PCWSTR::null())else{return false;};
+    if !matches_player(host,"cloudmusic.exe") || !IsWindowEnabled(host).as_bool(){return false;}
+    let _dpi=DpiContext(SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
+    let scale=windows::Win32::UI::HiDpi::GetDpiForWindow(host)as f64/96.0;
+    struct Search(Option<HWND>);
+    unsafe extern "system" fn visit(hwnd:HWND,param:LPARAM)->BOOL {
+        let mut name=[0u16;80];let n=GetClassNameW(hwnd,&mut name);
+        let class=String::from_utf16_lossy(&name[..n.max(0)as usize]);
+        // 输入控件在旧版叫 Chrome_RenderWidgetHostHWND，新版是 Chrome_WidgetWin_0。
+        if class=="Chrome_RenderWidgetHostHWND" || class=="Chrome_WidgetWin_0" {
+            (*(param.0 as *mut Search)).0=Some(hwnd);return BOOL(0);
+        }
+        BOOL(1)
+    }
+    unsafe fn widget(host:HWND,scale:f64,visit:unsafe extern "system" fn(HWND,LPARAM)->BOOL)->Option<HWND>{
+        let mut search=Search(None);
+        let _=EnumChildWindows(host,Some(visit),LPARAM(&mut search as *mut _ as isize));
+        search.0.filter(|hwnd|{
+            let mut rect=RECT::default();
+            GetClientRect(*hwnd,&mut rect).is_ok() && scale>0.0
+                && rect.right as f64/scale>=800.0 && rect.bottom as f64/scale>=550.0
+        })
+    }
+    // 最小化时没有可点击控件：透明还原后等待控件出现；drop 时恢复透明度并最小化。
+    struct Restore(HWND,bool,isize,bool);
+    impl Drop for Restore {
+        fn drop(&mut self){
+            if !self.1{return;}
+            unsafe{
+                let _=SetLayeredWindowAttributes(self.0,COLORREF::default(),255,LWA_ALPHA);
+                if !self.3{let _=SetWindowLongPtrW(self.0,GWL_EXSTYLE,self.2);}
+                let _=ShowWindowAsync(self.0,SW_MINIMIZE);
+            }
+        }
+    }
+    let mut restore=Restore(host,false,0,true);
+    let Some(target)=widget(host,scale,visit).or_else(||{
+        if !IsIconic(host).as_bool(){return None;}
+        let exstyle=GetWindowLongPtrW(host,GWL_EXSTYLE);
+        let layered=exstyle & WS_EX_LAYERED.0 as isize!=0;
+        if !layered{let _=SetWindowLongPtrW(host,GWL_EXSTYLE,exstyle|WS_EX_LAYERED.0 as isize);}
+        let _=SetLayeredWindowAttributes(host,COLORREF::default(),0,LWA_ALPHA);
+        let _=ShowWindowAsync(host,SW_SHOWNOACTIVATE);
+        restore.1=true;restore.2=exstyle;restore.3=layered;
+        let deadline=Instant::now()+Duration::from_millis(1200);
+        loop{
+            if let Some(hwnd)=widget(host,scale,visit){return Some(hwnd);}
+            if Instant::now()>=deadline{return None;}
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }) else{return false;};
+    let mut rect=RECT::default();if GetClientRect(target,&mut rect).is_err(){return false;}
+    let Some(mut p)=point(rect,position,duration,1.0)else{return false;};
+    p.y=rect.bottom-(82.0*scale).round()as i32;
+    let lp=LPARAM(((p.y as u32&0xffff)<<16 | (p.x as u32&0xffff))as isize);
+    let send=|msg,buttons|SendMessageTimeoutW(target,msg,WPARAM(buttons),lp,SMTO_ABORTIFHUNG|SMTO_ERRORONEXIT,500,None).0!=0;
+    if !send(WM_MOUSEMOVE,0){return false;}
+    let down=send(WM_LBUTTONDOWN,1);let up=send(WM_LBUTTONUP,0);down&&up
+}}
+
 #[cfg(test)]
 mod tests{
     use super::*;

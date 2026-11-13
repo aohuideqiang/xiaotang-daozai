@@ -23,6 +23,19 @@ use std::path::PathBuf;
 pub const PW: f32 = 419.0; // 展开面板宽
 pub const PH: f32 = 140.0; // 展开面板高
 pub(crate) const CALENDAR_PAGE: usize = 7;
+
+/// 音乐进度条落在左右滑切页的区域内。按在进度条上时不能开始切页，
+/// 否则松手会先翻页，这一帧不再绘制音乐页，跳转命令也就发不出去。
+fn swipe_starts_here(page: usize, has_music: bool, lyrics: bool, local: Pos2) -> bool {
+    let zone = Rect::from_min_size(Pos2::new(36.0, 31.0), Vec2::new(347.0, 81.0));
+    if !zone.contains(local) { return false; }
+    if page == 0 && has_music {
+        let (bx, bw, by) = if lyrics { (44.0, 176.0, 82.0) } else { (96.0, 221.0, 92.6) };
+        let seek = Rect::from_min_size(Pos2::new(bx - 8.0, by - 18.0), Vec2::new(bw + 16.0, 36.0));
+        if seek.contains(local) { return false; }
+    }
+    true
+}
 pub(crate) const CALENDAR_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
@@ -368,6 +381,7 @@ pub struct App {
     island_lyric_layout: Option<std::sync::Arc<egui::Galley>>,
     media_anchor: (String, f64, f64, bool),
     pub(crate) media: NowPlaying,
+    pub media_seeking: bool,
     pub(crate) music_artwork: Option<(std::sync::Arc<egui::ColorImage>,egui::TextureHandle)>,
 
     forced_open_until:f64,
@@ -498,6 +512,7 @@ impl App {
             island_lyric_layout: None,
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
+            media_seeking: false,
             music_artwork: None,
             forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
@@ -529,6 +544,11 @@ impl App {
     pub fn say(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), self.t));
         self.toast_below = false;
+    }
+
+    pub fn media_notice(&mut self, msg: impl Into<String>) {
+        self.say(msg);
+        self.toast_below = true;
     }
 
     pub(crate) fn code_copied(&mut self, _code:&str) {
@@ -1666,7 +1686,10 @@ impl App {
         if c.live && !self.is_editing() {
             let events=c.ui.ctx().input(|i|i.events.clone());
             for event in events {if let egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,..}=event {
-                if pressed {self.page_swipe_start=c.rect(36.0,31.0,347.0,81.0).contains(pos).then_some(pos);}
+                if pressed {
+                    let local=c.to_local(pos);
+                    self.page_swipe_start=swipe_starts_here(self.page,!self.media.title.is_empty(),self.show_lyrics,local).then_some(pos);
+                }
                 else if let Some(start)=self.page_swipe_start.take() {
                     let delta=pos-start;
                     if delta.x.abs()>55.0*c.s && delta.x.abs()>delta.y.abs()*1.5 {self.navigate_page(delta.x<0.0);}
@@ -2076,5 +2099,18 @@ impl App {
             self.cancel_edit();
             if added {self.open_task_reminder(0);}
         }
+    }
+}
+
+#[cfg(test)]
+mod swipe_tests {
+    use super::*;
+    #[test]
+    fn progress_drag_does_not_start_page_swipe() {
+        assert!(!swipe_starts_here(0, true, true, Pos2::new(80.0, 82.0)), "有歌词时的进度条");
+        assert!(!swipe_starts_here(0, true, false, Pos2::new(200.0, 92.6)), "无歌词时的进度条");
+        assert!(swipe_starts_here(0, true, true, Pos2::new(120.0, 50.0)), "封面和标题仍可左右滑切页");
+        assert!(swipe_starts_here(1, false, false, Pos2::new(200.0, 70.0)));
+        assert!(!swipe_starts_here(0, true, true, Pos2::new(10.0, 82.0)), "进度条左侧外面不在切页区");
     }
 }

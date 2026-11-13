@@ -292,9 +292,15 @@ impl eframe::App for Shell {
             }
         }
         if let Some(rx)=&self.seek_rx {
-            if let Ok(success)=rx.try_recv(){
+            let result=match rx.try_recv(){
+                Ok(success)=>Some(success),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)=>Some(false),
+                Err(std::sync::mpsc::TryRecvError::Empty)=>None,
+            };
+            if let Some(success)=result {
                 self.seek_rx=None;
-                if !success{self.app.say("播放器未完成跳转，请打开客户端后重试");}
+                self.app.media_seeking=false;
+                if !success{self.app.media_notice("未能确认跳转，请在播放器内调整进度");}
             }
         }
         let env = self.env(ctx);
@@ -351,6 +357,9 @@ impl eframe::App for Shell {
                 Cmd::Media(t) => {
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
                     if let smtc::Transport::Seek(seconds)=t {
+                        // 一个跳转完成后才接受下一次，避免工作线程排队执行旧目标。
+                        if self.seek_rx.is_some(){continue;}
+                        self.app.media_seeking=true;
                         let (tx,rx)=std::sync::mpsc::channel();self.seek_rx=Some(rx);
                         let ctx=ctx.clone();
                         std::thread::spawn(move || {let _=tx.send(smtc::seek(seconds,&source));ctx.request_repaint();});

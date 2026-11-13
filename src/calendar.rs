@@ -136,9 +136,14 @@ impl Config {
     }
 }
 
+/// 本机回环地址（含 `localhost`）才允许明文 HTTP，用来连隧道或本地日历服务。
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 pub fn validate_server(server: &str) -> Result<String, String> {
     let mut parsed = url::Url::parse(server.trim()).map_err(|_| "请填写完整的 CalDAV HTTPS 地址".to_string())?;
-    let local = parsed.host_str().is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()));
+    let local = parsed.host_str().is_some_and(is_loopback_host);
     if parsed.host_str().is_none() || !(parsed.scheme() == "https" || parsed.scheme() == "http" && local) {
         return Err("CalDAV 服务器需要 HTTPS；本机回环地址可使用 HTTP".into());
     }
@@ -403,6 +408,16 @@ impl Failure {
         Self { status: None, message: "连不上服务器，检查网络".into() }
     }
 
+    /// 本机回环地址上的日历多半是隧道或本地服务，失败原因和「网络不好」不是一回事。
+    fn unreachable(cfg: &Config, detail: &str) -> Self {
+        let local=url::Url::parse(&cfg.base()).ok().and_then(|url|url.host_str().map(is_loopback_host)).unwrap_or(false);
+        if local {
+            Self { status: None, message: "连不上本机日历服务，请确认 CalDAV 隧道或日历程序已启动".into() }
+        } else {
+            Self::transport(detail)
+        }
+    }
+
     fn text(message: impl Into<String>) -> Self {
         Self { status: None, message: message.into() }
     }
@@ -445,7 +460,7 @@ fn dav_response(
     let base=url::Url::parse(&cfg.base()).map_err(|_|Failure::text("日历服务器地址无效"))?;
     let mut target=url::Url::parse(url).map_err(|_|Failure::text("日历地址无效"))?;
     for attempt in 0..4 {
-        let local=base.host_str().is_some_and(|host|host.parse::<std::net::IpAddr>().is_ok_and(|ip|ip.is_loopback()));
+        let local=base.host_str().is_some_and(is_loopback_host);
         if target.origin()!=base.origin() || !target.username().is_empty() || target.password().is_some()
             || !(target.scheme()=="https" || target.scheme()=="http" && local) {
             return Err(Failure::text("日历返回了不可信地址，请重新连接"));
@@ -462,9 +477,9 @@ fn dav_response(
                     .map_err(|_|Failure::text("日历重定向地址无效"))?;
             }
             Ok(r) if r.status()>=300=>return Err(Failure::status(cfg.provider,r.status())),
-            Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::transport(&e.to_string())),
+            Ok(r)=>return r.into_string().map(|xml|(xml,target.to_string())).map_err(|e|Failure::unreachable(cfg,&e.to_string())),
             Err(ureq::Error::Status(code,_))=>return Err(Failure::status(cfg.provider,code)),
-            Err(e)=>return Err(Failure::transport(&e.to_string())),
+            Err(e)=>return Err(Failure::unreachable(cfg,&e.to_string())),
         }
     }
     Err(Failure::text("日历重定向次数过多"))
@@ -598,17 +613,21 @@ fn discover(agent: &ureq::Agent, cfg: &Config, password: &str) -> Result<String,
 
 fn discover_at(agent:&ureq::Agent,cfg:&Config,password:&str,start:&str,depth:&str)->Result<Option<String>,Failure>{
     let mut next=start.to_owned();let mut depth=depth;
-    let mut visited=std::collections::HashSet::new();
+    // 按「地址+深度」记录已探测，而不是只按地址：有的服务（如 Radicale）把
+    // calendar-home-set 指向 principal 本身，此时同一个地址需要以 Depth:1 再列一次
+    // 子集合，只按地址去重会把它当成重复而漏掉日历。
+    let mut probed=std::collections::HashSet::new();
     for _ in 0..8 {
-        if !visited.insert(next.clone()){return Err(Failure::text("日历服务器返回了循环的发现地址"));}
+        if !probed.insert((next.clone(),depth.to_string())){return Err(Failure::text("日历服务器返回了循环的发现地址"));}
         let (xml,base)=dav_response(agent,"PROPFIND",&next,depth,PROPFIND_BODY,cfg,password)?;
-        visited.insert(base.clone());
         if let Some(calendar)=pick_calendar(&xml,&base){return Ok(Some(calendar));}
-        if let Some(home)=calendar_home(&xml,&base).filter(|url|!visited.contains(url)) {
-            next=home;depth="1";
-        } else if let Some(principal)=property_href(&xml,"current-user-principal",&base).filter(|url|!visited.contains(url)) {
-            next=principal;depth="0";
-        } else {return Ok(None);}
+        if let Some(home)=calendar_home(&xml,&base) {
+            if !probed.contains(&(home.clone(),"1".to_string())){next=home;depth="1";continue;}
+        }
+        if let Some(principal)=property_href(&xml,"current-user-principal",&base) {
+            if !probed.contains(&(principal.clone(),"0".to_string())){next=principal;depth="0";continue;}
+        }
+        return Ok(None);
     }
     Err(Failure::text("日历服务发现次数过多，请重新连接"))
 }
@@ -1083,6 +1102,52 @@ END:VCALENDAR</c:calendar-data></d:prop></d:propstat></d:response></d:multistatu
     }
 
     #[test]
+    fn discovery_home_equal_to_principal_still_lists_children() {
+        // Radicale 等服务的 calendar-home-set 与 principal 是同一个地址；
+        // 发现流程必须先以 Depth:0 拿到它，再以 Depth:1 列一次子集合。
+        use std::io::{Read,Write};
+        use std::net::TcpListener;
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base=format!("http://{}/",listener.local_addr().unwrap());
+        let (stop_tx,stop_rx)=std::sync::mpsc::channel();
+        let worker=std::thread::spawn(move || {
+            let mut seen=Vec::new();
+            while stop_rx.try_recv().is_err() {
+                let Ok((mut stream,_))=listener.accept() else {std::thread::sleep(Duration::from_millis(5));continue;};
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut request=String::new();
+                while !request.contains("\r\n\r\n") {
+                    let mut buf=[0;4096];let n=stream.read(&mut buf).unwrap();if n==0{break;}
+                    request.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+                let path=request.split_whitespace().nth(1).unwrap().to_owned();
+                let depth=request.lines().find(|l|l.to_ascii_lowercase().starts_with("depth:")).map(|l|l.split(':').nth(1).unwrap_or("").trim().to_string()).unwrap_or_default();
+                seen.push((path.clone(),depth.clone()));
+                let body=match (path.as_str(),depth.as_str()) {
+                    ("/",_)=>r#"<d:multistatus xmlns:d="DAV:"><d:response><d:href>/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:current-user-principal><d:href>/karma/</d:href></d:current-user-principal></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
+                    ("/karma/","0")=>r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/karma/</d:href><d:propstat><d:prop><d:resourcetype><d:principal/><d:collection/></d:resourcetype><d:current-user-principal><d:href>/karma/</d:href></d:current-user-principal><c:calendar-home-set><d:href>/karma/</d:href></c:calendar-home-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
+                    ("/karma/","1")=>r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/karma/</d:href><d:propstat><d:prop><d:resourcetype><d:principal/><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response><d:response><d:href>/karma/calendar/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:calendar/></d:resourcetype><d:displayname>Calendar</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
+                    _=>""
+                };
+                let status=if body.is_empty(){404}else{207};
+                write!(stream,"HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+            seen
+        });
+        let cfg=Config{provider:Provider::Custom,username:"karma".into(),href:None,server:Some(base.clone())};
+        let result=discover(&agent(),&cfg,"synthetic-password");
+        stop_tx.send(()).unwrap();
+        let seen=worker.join().unwrap();
+        assert_eq!(result.unwrap(),format!("{base}karma/calendar/"));
+        assert_eq!(seen,vec![
+            ("/".to_string(),"1".to_string()),
+            ("/karma/".to_string(),"0".to_string()),
+            ("/karma/".to_string(),"1".to_string()),
+        ],"home 与 principal 相同时，必须再以 Depth:1 列一次子集合");
+    }
+
+    #[test]
     fn discovery_only_selects_calendar_collections_including_self() {
         let xml=r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/dav/account/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><c:calendar-home-set><d:href>/dav/home/</d:href></c:calendar-home-set></d:prop></d:propstat></d:response></d:multistatus>"#;
         assert_eq!(pick_calendar(xml,"https://example.com/"),None,"日历主目录属性不能被当成日历集合类型");
@@ -1456,6 +1521,16 @@ END:VCALENDAR</c:calendar-data></d:prop></d:propstat></d:response></d:multistatu
         assert_eq!(Failure::status(Provider::WeCom, 401).message, "用户名或密码不对，请回企业微信重新生成一次");
         assert_eq!(Failure::transport("timed out").message, "连不上服务器，检查网络");
         assert_eq!(Failure::status(Provider::DingTalk, 404).message, "服务器地址不对（404）");
+    }
+
+    #[test]
+    fn loopback_calendar_failure_mentions_the_tunnel() {
+        let local = Config::from_input(Provider::Custom, "Alice", "http://127.0.0.1:5232/").unwrap();
+        assert!(Failure::unreachable(&local, "connection refused").message.contains("隧道"));
+        let named = Config::from_input(Provider::Custom, "Alice", "http://localhost:5232/").unwrap();
+        assert!(Failure::unreachable(&named, "connection refused").message.contains("隧道"));
+        let remote = Config::from_input(Provider::Custom, "Alice", "https://calendar.example/dav/").unwrap();
+        assert_eq!(Failure::unreachable(&remote, "timed out").message, "连不上服务器，检查网络");
     }
 
     #[test]

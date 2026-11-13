@@ -6,8 +6,8 @@ use serde_json::{Value,json};
 #[derive(Default,Clone)]
 struct Snapshot { clips:Vec<String>, cpu:f64, memory:f64, tasks:String, updated:String, edge:Vec<Download>, edge_error:String }
 #[derive(Clone)]
-struct Config { enabled:[bool;5], shortcuts:Vec<(String,String)>, bridge:String, courses:String }
-impl Default for Config {fn default()->Self {Self{enabled:[true;5],shortcuts:vec![],bridge:String::new(),courses:String::new()}}}
+struct Config { enabled:[bool;5], shortcuts:Vec<(String,String)>, bridge:String, courses:String, ssh_host:String, ssh_user:String, ssh_port:String, ssh_key:String }
+impl Default for Config {fn default()->Self {Self{enabled:[true;5],shortcuts:vec![],bridge:String::new(),courses:String::new(),ssh_host:String::new(),ssh_user:String::new(),ssh_port:"22".into(),ssh_key:String::new()}}}
 fn config_path()->std::path::PathBuf{crate::model::config_dir().join("desktop-tools.json")}
 fn single_line(value:&str)->String{value.split_whitespace().collect::<Vec<_>>().join(" ")}
 fn download_progress(d:&Download)->String{
@@ -27,9 +27,14 @@ impl Config {
  fn load()->Self {let mut c=Self::default();if let Ok(raw)=std::fs::read(config_path()){if let Ok(v)=serde_json::from_slice::<Value>(&raw){
  if let Some(a)=v["enabled"].as_array(){for(i,b)in a.iter().take(5).enumerate(){c.enabled[i]=b.as_bool().unwrap_or(true);}}
  c.bridge=v["bridge"].as_str().unwrap_or_default().into();c.courses=v["courses"].as_str().unwrap_or_default().into();
+ c.ssh_host=v["ssh_host"].as_str().unwrap_or_default().into();c.ssh_user=v["ssh_user"].as_str().unwrap_or_default().into();
+ c.ssh_port=v["ssh_port"].as_str().filter(|s|!s.trim().is_empty()).unwrap_or("22").into();
+ c.ssh_key=v["ssh_key"].as_str().unwrap_or_default().into();
  if let Some(rows)=v["shortcuts"].as_array(){c.shortcuts=rows.iter().take(50).filter_map(|r|Some((r[0].as_str()?.into(),r[1].as_str()?.into()))).collect();}
- }}c}
- fn save(&self)->Result<(),String>{let raw=serde_json::to_vec(&json!({"enabled":self.enabled,"shortcuts":self.shortcuts,"bridge":self.bridge,"courses":self.courses})).unwrap();std::fs::create_dir_all(crate::model::config_dir()).map_err(|e|e.to_string())?;crate::model::atomic_write(&config_path(),&raw).map_err(|e|e.to_string())}
+ }}
+ if c.ssh_host.trim().is_empty(){backfill_ssh(&mut c);if !c.ssh_host.trim().is_empty(){let _=c.save();}}
+ c}
+ fn save(&self)->Result<(),String>{let raw=serde_json::to_vec(&json!({"enabled":self.enabled,"shortcuts":self.shortcuts,"bridge":self.bridge,"courses":self.courses,"ssh_host":self.ssh_host,"ssh_user":self.ssh_user,"ssh_port":self.ssh_port,"ssh_key":self.ssh_key})).unwrap();std::fs::create_dir_all(crate::model::config_dir()).map_err(|e|e.to_string())?;crate::model::atomic_write(&config_path(),&raw).map_err(|e|e.to_string())}
 }
 #[derive(Clone,Default)]
 struct Download {url:String, path:String, bytes:u64,total:u64,status:String}
@@ -40,6 +45,26 @@ pub(crate) struct Tools {
 impl Default for Tools {fn default()->Self{Self{open:false,tab:0,mini:false,week:false,offset:0,config:Config::load(),shared:Default::default(),tx:None,downloads:vec![],url:String::new(),label:String::new(),target:String::new(),filter:String::new(),note:String::new(),courses:Value::Null,server_offset:0}}}
 fn bounded_clip(clips:&mut Vec<String>,text:String){if text.trim().is_empty(){return;}clips.retain(|s|s!=&text);if text.len()>2*1024*1024{return;}clips.insert(0,text);clips.truncate(100);}
 impl Tools {
+ fn write_server_connection(&self){write_connection(&self.config)}
+ fn ensure_bridge(&mut self){
+  let mut dirty=false;
+  {
+   let dir=crate::model::config_dir();
+   let target=dir.join("server-overview.py");
+   let bundled=include_bytes!("../runtime/server-overview.py");
+   let manages=self.config.bridge.trim().is_empty() || std::path::Path::new(self.config.bridge.trim())==target;
+   let stale=!std::fs::read(&target).is_ok_and(|current|current==bundled);
+   if manages && (self.config.bridge.trim().is_empty() || stale) {
+    let ok=std::fs::create_dir_all(&dir).is_ok() && crate::model::atomic_write(&target,bundled).is_ok();
+    if ok { self.config.bridge=target.to_string_lossy().into_owned(); dirty=true; }
+   }
+  }
+  if self.config.courses.is_empty(){
+   let candidate=crate::model::config_dir().join("courses.json");
+   if candidate.exists(){ self.config.courses=candidate.to_string_lossy().into_owned(); dirty=true; }
+  }
+  if dirty { let _=self.config.save(); }
+ }
  #[cfg(test)]
  pub(crate) fn set_server_test_snapshot(&mut self, value:&str){self.tx=None;self.shared.lock().unwrap().tasks=value.into();}
  pub(crate) fn scroll_server(&mut self,next:bool)->bool {
@@ -52,17 +77,21 @@ impl Tools {
   self.server_offset=target;
   changed
  }
- fn start(&mut self){if self.tx.is_some(){return;}let (tx,rx)=mpsc::channel();let shared=self.shared.clone();let mut config=self.config.clone();self.tx=Some(tx);
+ fn start(&mut self){if self.tx.is_some(){return;}self.ensure_bridge();let (tx,rx)=mpsc::channel();let shared=self.shared.clone();let mut config=self.config.clone();self.tx=Some(tx);
  std::thread::spawn(move||{let pending=Arc::new(std::sync::atomic::AtomicBool::new(false));let mut seq=0;let mut prior=(0,0,0);let mut tick=Instant::now()-Duration::from_secs(60);let mut server=Instant::now()-Duration::from_secs(60);let mut edge=Instant::now()-Duration::from_secs(60);let edge_pending=Arc::new(std::sync::atomic::AtomicBool::new(false));
  loop{match rx.recv_timeout(Duration::from_millis(500)){Ok(c)=>{config=c;server=Instant::now()-Duration::from_secs(60);},Err(mpsc::RecvTimeoutError::Disconnected)=>break,Err(_)=>{}}
  #[cfg(windows)] if config.enabled[0]{if let Some((s,text))=native_clip(seq){seq=s;if let Some(text)=text{if let Ok(mut state)=shared.lock(){bounded_clip(&mut state.clips,text);}}}}else if let Ok(mut state)=shared.lock(){state.clips.clear();}
  if !config.enabled[1]{if let Ok(mut s)=shared.lock(){s.edge.clear();s.edge_error.clear();}}
  if config.enabled[1]&&edge.elapsed()>=Duration::from_secs(2)&&!edge_pending.swap(true,std::sync::atomic::Ordering::Relaxed){edge=Instant::now();let shared=shared.clone();let pending=edge_pending.clone();std::thread::spawn(move||{let(rows,error)=edge_downloads();if let Ok(mut s)=shared.lock(){s.edge=rows;s.edge_error=error;}pending.store(false,std::sync::atomic::Ordering::Relaxed);});}
  if config.enabled[3]&&tick.elapsed()>=Duration::from_secs(2){tick=Instant::now();#[cfg(windows)]{let(cpu,memory)=native_perf(&mut prior);if let Ok(mut state)=shared.lock(){state.cpu=cpu;state.memory=memory;}}}
- if config.enabled[4]&&server.elapsed()>=Duration::from_secs(30)&&!pending.swap(true,std::sync::atomic::Ordering::Relaxed){server=Instant::now();let bridge=config.bridge.clone();let state=shared.clone();let pending=pending.clone();std::thread::spawn(move||{let message=if bridge.is_empty(){"尚未配置服务器总览来源".into()}else{run_bridge(&bridge)};if let Ok(mut state)=state.lock(){state.tasks=message;state.updated=chrono::Local::now().format("%H:%M:%S").to_string();}pending.store(false,std::sync::atomic::Ordering::Relaxed);});}
+ if config.enabled[4]&&server.elapsed()>=Duration::from_secs(30)&&!pending.swap(true,std::sync::atomic::Ordering::Relaxed){server=Instant::now();let bridge=config.bridge.clone();write_connection(&config);let state=shared.clone();let pending=pending.clone();std::thread::spawn(move||{let message=if bridge.is_empty(){"尚未配置服务器总览来源".into()}else{run_bridge(&bridge)};if let Ok(mut state)=state.lock(){state.tasks=message;state.updated=chrono::Local::now().format("%H:%M:%S").to_string();}pending.store(false,std::sync::atomic::Ordering::Relaxed);});}
  }});}
  fn save(&mut self){self.note=match self.config.save(){Ok(())=>String::new(),Err(e)=>format!("保存失败：{e}")};if let Some(tx)=&self.tx{let _=tx.send(self.config.clone());}}
- fn read_courses(&mut self){self.courses=std::fs::read(&self.config.courses).ok().filter(|v|v.len()<2*1024*1024).and_then(|raw|serde_json::from_slice(&raw).ok()).unwrap_or(Value::Null);}
+ fn read_courses(&mut self){
+  let configured=self.config.courses.trim();
+  let path=if configured.is_empty(){crate::model::config_dir().join("courses.json")}else{std::path::PathBuf::from(configured)};
+  self.courses=std::fs::read(&path).ok().filter(|v|v.len()<2*1024*1024).and_then(|raw|serde_json::from_slice(&raw).ok()).unwrap_or(Value::Null);
+ }
  fn course_day(&self,day:NaiveDate)->Vec<String>{course_day(&self.courses,day)}
  fn start_download(&mut self){if self.downloads.iter().filter(|d|d.lock().is_ok_and(|d|d.status=="下载中")).count()>=3{self.note="最多同时下载 3 个任务".into();return;}
  let Ok(url)=url::Url::parse(self.url.trim())else{self.note="请输入完整下载地址".into();return;};if !matches!(url.scheme(),"https"|"http")||!url.username().is_empty()||url.password().is_some(){self.note="下载地址需要 HTTP/HTTPS，且不能包含密码".into();return;}
@@ -76,6 +105,34 @@ impl Tools {
 }
 fn course_day(data:&Value,day:NaiveDate)->Vec<String>{let Some(start)=data["term_start"].as_str().and_then(|s|NaiveDate::parse_from_str(s,"%Y-%m-%d").ok())else{return vec![];};let key=day.to_string();if data["holidays"].as_array().is_some_and(|a|a.iter().any(|v|v.as_str()==Some(&key))){return vec![];}let days=(day-start).num_days();if days<0||data["term_end"].as_str().is_some_and(|end|key.as_str()>end){return vec![];}let week=days/7+1;data["rules"].as_array().map(|rules|rules.iter().filter(|r|r["weekday"].as_u64()==Some(day.weekday().number_from_monday() as u64)&&r["weeks"].as_array().is_some_and(|w|w.iter().any(|n|n.as_i64()==Some(week)))).map(|r|format!("{} · {}节\n{}\n{}\n{}",r["start"].as_str().unwrap_or(""),r["periods"].as_str().unwrap_or(""),r["course"].as_str().unwrap_or(""),r["location"].as_str().unwrap_or(""),r["teacher"].as_str().unwrap_or(""))).collect()).unwrap_or_default()}
 fn run_bridge(path:&str)->String{let mut cmd=std::process::Command::new("python");cmd.arg(path);#[cfg(windows)]{use std::os::windows::process::CommandExt;cmd.creation_flags(0x08000000);}match cmd.output(){Ok(o)if o.status.success()=>String::from_utf8_lossy(&o.stdout[..o.stdout.len().min(65536)]).into(),_=>"服务器总览暂时不可用（稍后自动重试）".into()}}
+fn backfill_ssh(config:&mut Config){
+ let path=crate::model::config_dir().join("server-connection.json");
+ let Ok(raw)=std::fs::read(&path)else{return};
+ let Ok(value)=serde_json::from_slice::<Value>(&raw)else{return};
+ let Some(cmd)=value["ssh_command"].as_array()else{return};
+ let args:Vec<&str>=cmd.iter().filter_map(|v|v.as_str()).collect();
+ let Some(target)=args.iter().copied().find(|s|s.contains('@')&&!s.starts_with('-'))else{return};
+ let Some((user,host))=target.split_once('@')else{return};
+ if host.is_empty()||user.is_empty(){return;}
+ config.ssh_user=user.into();config.ssh_host=host.into();
+ if let Some(i)=args.iter().position(|s|*s=="-p"){if let Some(port)=args.get(i+1).filter(|p|!p.is_empty()){config.ssh_port=(*port).into();}}
+ if let Some(i)=args.iter().position(|s|*s=="-i"){if let Some(key)=args.get(i+1){config.ssh_key=(*key).into();}}
+}
+fn write_connection(config:&Config){
+ let host=config.ssh_host.trim();
+ if host.is_empty(){return;}
+ let user=if config.ssh_user.trim().is_empty(){"root"}else{config.ssh_user.trim()};
+ let port=if config.ssh_port.trim().is_empty(){"22"}else{config.ssh_port.trim()};
+ let mut cmd=vec!["ssh".to_string(),"-o".into(),"BatchMode=yes".into(),"-o".into(),"ConnectTimeout=12".into(),"-o".into(),"StrictHostKeyChecking=accept-new".into()];
+ if !config.ssh_key.trim().is_empty(){cmd.push("-i".into());cmd.push(config.ssh_key.trim().to_string());}
+ cmd.push("-p".into());cmd.push(port.to_string());
+ cmd.push(format!("{user}@{host}"));
+ cmd.push("python3".into());cmd.push("-".into());
+ let body=json!({"ssh_command":cmd});
+ let path=crate::model::config_dir().join("server-connection.json");
+ let _=std::fs::create_dir_all(crate::model::config_dir());
+ let _=crate::model::atomic_write(&path,serde_json::to_vec(&body).unwrap_or_default().as_slice());
+}
 impl crate::app::App {
  pub fn accept_download_url(&mut self,url:String){
   self.show_page(10);self.desktop_tools.tab=2;self.desktop_tools.open=true;
@@ -134,10 +191,13 @@ impl crate::app::App {
   else {
    let parsed=serde_json::from_str::<Value>(&state.tasks).ok();
    if let Some(rows)=parsed.as_ref().and_then(|v|v["services"].as_array()) {
+    let connected=parsed.as_ref().and_then(|v|v["connected"].as_bool()).unwrap_or(true);
     t.server_offset=t.server_offset.min(rows.len().saturating_sub(1)/3*3);
     c.text(45.0,43.0,"名称",9.0,W::Semibold,theme::GRAY,H::Left);
     c.text(155.0,43.0,"用途",9.0,W::Semibold,theme::GRAY,H::Left);
-    c.text(325.0,43.0,"状态",9.0,W::Semibold,theme::GRAY,H::Right);
+    let status=if connected{"状态".to_string()}else{parsed.as_ref().and_then(|v|v["reason"].as_str()).unwrap_or("连接失败").to_string()};
+    let status=c.fit(&status,9.0,W::Semibold,150.0);
+    c.text(325.0,43.0,&status,9.0,W::Semibold,if connected{theme::GRAY}else{theme::RED_TOP},H::Right);
     for(i,row) in rows.iter().skip(t.server_offset).take(3).enumerate(){
      let y=48.0+i as f32*22.0;
      c.fill(39.0,y,296.0,20.0,6.0,card);
@@ -185,8 +245,14 @@ impl crate::app::App {
  });}},
  3=>{ui.add_enabled_ui(t.config.enabled[2],|ui|{ui.label("名称");ui.text_edit_singleline(&mut t.label);ui.label("应用/文件夹路径或 HTTPS 网址");ui.text_edit_singleline(&mut t.target);if ui.button("添加快捷入口").clicked()&&!t.label.trim().is_empty()&&!t.target.trim().is_empty()&&t.config.shortcuts.len()<50{t.config.shortcuts.push((t.label.trim().into(),t.target.trim().into()));t.label.clear();t.target.clear();t.save();}let mut remove=None;for(i,(name,target))in t.config.shortcuts.iter().enumerate(){ui.horizontal(|ui|{if ui.button(name).clicked(){if target.starts_with("https://")||target.starts_with("http://"){ctx.open_url(egui::OpenUrl::new_tab(target));}else{self.pending.push(crate::app::Cmd::Open(target.into()));}}if ui.small_button("移除").clicked(){remove=Some(i);}});}if let Some(i)=remove{t.config.shortcuts.remove(i);t.save();}});},
  4=>{if !t.config.enabled[3]{ui.label("系统采样已关闭");}else{ui.heading(format!("CPU  {:.1}%",state.cpu));ui.add(egui::ProgressBar::new(state.cpu as f32/100.0));ui.heading(format!("内存  {:.1}%",state.memory));ui.add(egui::ProgressBar::new(state.memory as f32/100.0));ui.weak("每 2 秒采样；首次 CPU 采样需等待下一次更新。");}},
- 5=>{ui.horizontal(|ui|{ui.label(format!("最近更新 {} · 每 30 秒同步",state.updated));if ui.button("刷新").clicked(){t.save();}});if !t.config.enabled[4]{ui.label("服务器同步已关闭");}else if let Ok(data)=serde_json::from_str::<Value>(&state.tasks){egui::Grid::new("server-overview-table").striped(true).show(ui,|ui|{ui.strong("名称");ui.strong("用途");ui.strong("状态");ui.end_row();if let Some(rows)=data["services"].as_array(){for row in rows{ui.label(row["name"].as_str().unwrap_or("—"));ui.label(row["description"].as_str().unwrap_or("—"));let color=match row["state"].as_str(){Some("ok")=>Color32::from_rgb(71,200,120),Some("down")=>Color32::from_rgb(240,95,95),_=>Color32::GRAY};ui.colored_label(color,row["label"].as_str().unwrap_or("未知"));ui.end_row();}}});}else{ui.label(if state.tasks.is_empty(){"正在读取服务器状态…"}else{&state.tasks});}},
- _=>{let mut changed=false;for(i,label)in ["剪贴板历史","下载任务","快捷启动","系统性能","服务器任务总览"].iter().enumerate(){changed|=ui.checkbox(&mut t.config.enabled[i],*label).changed();}ui.separator();ui.label("独立课表 JSON 文件");changed|=ui.text_edit_singleline(&mut t.config.courses).changed();ui.label("服务器总览读取脚本（只运行你配置的本机 Python 文件）");changed|=ui.text_edit_singleline(&mut t.config.bridge).changed();if changed{t.courses=Value::Null;t.save();}ui.weak("剪贴板历史不写入磁盘；关闭记录时清空内存缓存。");}
+ 5=>{let connected=serde_json::from_str::<Value>(&state.tasks).ok().and_then(|v|v["connected"].as_bool()).unwrap_or(true);ui.horizontal(|ui|{ui.label(format!("最近更新 {} · 每 30 秒同步",state.updated));if ui.button("刷新").clicked(){t.save();}if !connected{ui.colored_label(Color32::from_rgb(240,95,95),"· 数据未更新（连不上服务器）");}});if !t.config.enabled[4]{ui.label("服务器同步已关闭");}else if let Ok(data)=serde_json::from_str::<Value>(&state.tasks){egui::Grid::new("server-overview-table").striped(true).show(ui,|ui|{ui.strong("名称");ui.strong("用途");ui.strong("状态");ui.end_row();if let Some(rows)=data["services"].as_array(){for row in rows{ui.label(row["name"].as_str().unwrap_or("—"));ui.label(row["description"].as_str().unwrap_or("—"));let color=match row["state"].as_str(){Some("ok")=>Color32::from_rgb(71,200,120),Some("down")=>Color32::from_rgb(240,95,95),_=>Color32::GRAY};ui.colored_label(color,row["label"].as_str().unwrap_or("未知"));ui.end_row();}}});}else{ui.label(if state.tasks.is_empty(){"正在读取服务器状态…"}else{&state.tasks});}},
+  _=>{let mut changed=false;for(i,label)in ["剪贴板历史","下载任务","快捷启动","系统性能","服务器任务总览"].iter().enumerate(){changed|=ui.checkbox(&mut t.config.enabled[i],*label).changed();}ui.separator();ui.label("独立课表 JSON 文件");changed|=ui.text_edit_singleline(&mut t.config.courses).changed();
+  ui.add_space(6.0);ui.label(egui::RichText::new("服务器连接").strong());ui.add(egui::Label::new(egui::RichText::new("连不上时在这里改写，岛仔每 30 秒自动重试新配置。").size(11.0)));
+  ui.horizontal(|ui|{ui.label("主机");changed|=ui.add(egui::TextEdit::singleline(&mut t.config.ssh_host).hint_text("117.72.148.76").desired_width(180.0)).changed();ui.label("端口");changed|=ui.add(egui::TextEdit::singleline(&mut t.config.ssh_port).hint_text("22").desired_width(48.0)).changed();});
+  ui.horizontal(|ui|{ui.label("用户名");changed|=ui.add(egui::TextEdit::singleline(&mut t.config.ssh_user).hint_text("root").desired_width(180.0)).changed();});
+  ui.label("SSH 密钥路径（留空则用 ssh 默认密钥）");changed|=ui.add(egui::TextEdit::singleline(&mut t.config.ssh_key).hint_text("C:\\Users\\你\\.ssh\\id.pem").desired_width(f32::INFINITY)).changed();
+  if ui.button("保存并立即重试").clicked(){t.note=String::new();t.write_server_connection();t.save();}
+  ui.separator();ui.label("服务器总览读取脚本（只运行你配置的本机 Python 文件）");changed|=ui.text_edit_singleline(&mut t.config.bridge).changed();if changed{t.courses=Value::Null;t.save();}ui.weak("剪贴板历史不写入磁盘；关闭记录时清空内存缓存。");}
  }if !t.note.is_empty(){ui.colored_label(Color32::from_rgb(240,170,90),&t.note);}});});ctx.set_style(original);});t.open=open;
  }
 }
