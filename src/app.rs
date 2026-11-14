@@ -64,8 +64,11 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气"];
+pub(crate) const PAGE_NAMES: [&str; 14] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气", "课表", "下载", "快捷启动", "系统性能", "服务器任务"];
+// [plugin: desktop_tools] 插件页面在 9..=13，各页只调插件一行（见 render_page）。
+pub const PLUGIN_PAGE_BASE: usize = 9;
 pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1,2,3,5,4,7,11,8,12];
+/// 插件页没有对应的设置分页：齿轮改为打开桌面工具（见 panel_body）。
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -655,7 +658,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 9],
+    dots: [Spring; 14],
     wheel_delta: f32,
     wheel_page_at: f64,
     wheel_at: f64,
@@ -1412,6 +1415,8 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
+            // [plugin: desktop_tools] 插件页没有设置分页，改为打开桌面工具窗口。
+            if page>=PLUGIN_PAGE_BASE {crate::plugins::desktop_tools::open(page-PLUGIN_PAGE_BASE);return;}
             self.settings_tab=PAGE_SETTINGS_TABS[page];
             self.open_settings();
             return;
@@ -1662,7 +1667,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==WEATHER_PAGE {WEATHER_H}else if self.page>=PLUGIN_PAGE_BASE {PH}else if self.page==6{176.0}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------
@@ -1841,8 +1846,13 @@ impl App {
                                     let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
                                     let changed=target!=*first;*first=target;changed
                                 });
+                                // [plugin: desktop_tools] 服务器任务页的列表优先滚 3 行，滚不动再翻页。
+                                let server_scrolled=self.page==13 && {
+                                    let inside=Rect::from_min_max(Pos2::new(55.0,31.0),Pos2::new(340.0,118.0)).contains(cursor);
+                                    inside && crate::plugins::desktop_tools::scroll_server(next)
+                                };
                                 // 内容溢出时滚动列表并停在边界；未溢出时滚轮翻页。
-                                if !scrolled && !content_scrolls && !self.todo_choosing && self.t-self.wheel_page_at>=0.20 {
+                                if !scrolled && !content_scrolls && !server_scrolled && !self.todo_choosing && self.t-self.wheel_page_at>=0.20 {
                                     self.navigate_page(next);
                                     self.wheel_page_at=self.t;
                                 }
@@ -2762,7 +2772,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=PAGE_SETTINGS_TABS[self.page];self.open_settings();}
+        if settings.clicked(){if self.page>=PLUGIN_PAGE_BASE{crate::plugins::desktop_tools::open(self.page-PLUGIN_PAGE_BASE);}else{self.settings_tab=PAGE_SETTINGS_TABS[self.page];self.open_settings();}}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             // 健康提醒设置沿用主页的标题 + 喝水/久坐切换，切到哪边就设置哪边。
@@ -2814,6 +2824,8 @@ impl App {
             6 => ("AI", "额度", theme::SOFT_GREEN),
             8 if self.weather.solar_open => ("日出", "日落", theme::YELLOW),
             8 => ("当地", "天气", theme::CYAN),
+            // [plugin: desktop_tools] 插件页的标题由页面自己画，这里不重复。
+            9..=13 => return,
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -2873,6 +2885,8 @@ impl App {
             6 => self.page_quota(c),
             8 => self.page_weather(c,env,cmds),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            // [plugin: desktop_tools] 课表/下载/快捷启动/系统性能/服务器任务，一页一行。
+            9..=13 => crate::plugins::desktop_tools::page(self,page-9,c,env),
             _ => self.page_settings(c),
         }
     }

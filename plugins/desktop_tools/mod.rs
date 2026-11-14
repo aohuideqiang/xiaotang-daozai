@@ -1,15 +1,28 @@
-//! 桌面工具插件：独立课表、下载、快捷启动、系统性能与服务器任务总览。
+//! 桌面工具页面：把课表、下载、快捷启动、系统性能和服务器任务放进岛体的翻页里。
 //!
-//! 这些功能全部在插件自己的窗口里，岛体只保留一个入口；这样上游调整页面、
-//! 页面数组和渲染顺序时都不需要改动这里。
+//! 上游页面数组是固定长度，插件页面接在最后（`app::PLUGIN_PAGE_BASE` 起），
+//! 每页只在 `render_page` 里调一行；左右滑动和边缘滚轮按页面数循环，自然覆盖新页。
+
 mod config;
 mod courses;
 mod drop;
 mod sampler;
 mod window;
 
+use eframe::egui;
 use serde_json::Value;
 use std::sync::{Arc, Mutex, OnceLock};
+
+/// 插件页面数量，与 `app::PAGE_NAMES` 尾部五项一致。
+pub const PAGES: usize = 5;
+/// 每页在设置里的说明，供「页面管理」显示。
+pub const PAGE_LABELS: [(&str, &str); PAGES] = [
+    ("课表", "独立课表：今明两天与完整一周，按学期周次和节假日排课"),
+    ("下载", "Edge 正在下载的文件和岛仔自己的下载任务"),
+    ("快捷启动", "常用应用、文件夹或网址，一键打开"),
+    ("系统性能", "CPU 与内存占用，每 2 秒采样"),
+    ("服务器任务", "通过 SSH 读取服务器容器与服务状态，每 30 秒刷新"),
+];
 
 pub(crate) struct Tools {
     pub open: bool,
@@ -18,7 +31,6 @@ pub(crate) struct Tools {
     pub offset: i64,
     pub config: config::Config,
     pub shared: Arc<Mutex<sampler::Snapshot>>,
-    /// 采样线程的配置发送端；线程启动后才有值。
     tx: Option<std::sync::mpsc::Sender<config::Config>>,
     pub downloads: Vec<Arc<Mutex<sampler::Download>>>,
     pub url: String,
@@ -26,6 +38,10 @@ pub(crate) struct Tools {
     pub target: String,
     pub note: String,
     pub courses: Value,
+    /// 服务器任务页的滚轮偏移（每次 3 行）。
+    pub server_offset: usize,
+    /// 岛体页面里正在输入下载地址时，请求键盘焦点。
+    pub focus_url: bool,
 }
 
 impl Default for Tools {
@@ -44,6 +60,8 @@ impl Default for Tools {
             target: String::new(),
             note: String::new(),
             courses: Value::Null,
+            server_offset: 0,
+            focus_url: false,
         }
     }
 }
@@ -54,8 +72,30 @@ fn tools() -> &'static Mutex<Tools> {
     TOOLS.get_or_init(|| Mutex::new(Tools::default()))
 }
 
-/// 每帧调用：先处理拖放进来的内容，再按需画工具窗口。
-pub(crate) fn frame(ctx: &eframe::egui::Context, app: &mut crate::app::App) {
+/// 岛体每次绘制插件页时调用；`index` 是 0..PAGES（页面序号减 `PLUGIN_PAGE_BASE`）。
+pub(crate) fn page(app: &mut crate::app::App, index: usize, c: &crate::paint::Card, env: &crate::app::Env) {
+    let Ok(mut tools) = tools().lock() else { return; };
+    tools.start();
+    let snapshot = tools.shared.lock().map(|snapshot| snapshot.clone()).unwrap_or_default();
+    match index {
+        0 => window::page_courses(c, env, &mut tools),
+        1 => window::page_downloads(c, &mut tools, &snapshot),
+        2 => window::page_shortcuts(c, &mut tools),
+        3 => window::page_performance(c, &mut tools, &snapshot),
+        4 => window::page_server(c, &mut tools, &snapshot),
+        _ => {}
+    }
+    // 拖链接进来的下载只有独立窗口能输入，岛体页给一个入口。
+    if index == 1 && tools.focus_url {
+        tools.focus_url = false;
+        tools.open = true;
+        tools.tab = 1;
+    }
+    let _ = app;
+}
+
+/// 每帧调用：处理拖放进来的内容，并在打开时画独立窗口。
+pub(crate) fn frame(ctx: &egui::Context, app: &mut crate::app::App) {
     for payload in drop::take() {
         match payload {
             drop::Payload::Url(url) => open_download(url),
@@ -71,29 +111,37 @@ pub(crate) fn frame(ctx: &eframe::egui::Context, app: &mut crate::app::App) {
 }
 
 /// 在岛体窗口上注册拖放目标；文件仍交给置物架。
-pub(crate) fn install_drop(hwnd: windows::Win32::Foundation::HWND, ctx: eframe::egui::Context) -> windows::core::Result<()> {
+pub(crate) fn install_drop(hwnd: windows::Win32::Foundation::HWND, ctx: egui::Context) -> windows::core::Result<()> {
     drop::install(hwnd, ctx)
 }
 
-/// 打开工具窗口；`tab` 是 `window::TABS` 的下标。
+/// 打开独立窗口（设置里的入口用）；`tab` 是窗口分页下标。
 pub fn open(tab: usize) {
     if let Ok(mut tools) = tools().lock() {
         tools.open = true;
-        tools.tab = tab.min(5);
+        tools.tab = tab.min(window::TABS.len() - 1);
     }
 }
 
-/// 拖进一个链接：直接切到下载页并开始下载。
+/// 拖进一个链接：切到「下载」页并打开下载窗口。
 pub(crate) fn open_download(url: String) {
     if let Ok(mut tools) = tools().lock() {
+        if !tools.config.enabled[0] {
+            tools.note = "下载功能已关闭，请先在设置里打开".into();
+            return;
+        }
+        tools.url = url;
         tools.open = true;
         tools.tab = 1;
-        if tools.config.enabled[0] {
-            tools.url = url;
-            tools.start_download();
-        } else {
-            tools.note = "下载功能已关闭，请先在「设置」里打开".into();
-        }
+        tools.start_download();
+    }
+}
+
+/// 岛体「服务器任务」页用滚轮翻行：一次 3 行，返回是否滚动了。
+pub(crate) fn scroll_server(next: bool) -> bool {
+    match tools().lock() {
+        Ok(mut tools) => window::scroll_server(&mut tools, next),
+        Err(_) => false,
     }
 }
 
